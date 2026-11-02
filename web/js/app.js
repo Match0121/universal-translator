@@ -1,6 +1,6 @@
 // app.js — 入口：路由 + 游戏翻译全流程编排
 
-import { $, $$, debounce, extOf, fmtBytes, escapeHtml, downloadBlob, saveBlobDialog, pickSaveFile, writeSaveHandle } from './utils.js';
+import { $, $$, debounce, extOf, fmtBytes, escapeHtml, downloadBlob, saveBlobDialog, pickSaveFile, writeSaveHandle, pickDirectory, writeDirFile } from './utils.js';
 import { store } from './store.js';
 import { parseExe } from './features/game/exeParser.js';
 import { pickGameFolder, scanFolder } from './features/game/dirScanner.js';
@@ -11,6 +11,8 @@ import { renderFileList, renderFileTree, renderFileContent, showProgress, hidePr
 import { exportZip, exportXp3 } from './features/game/exporter.js';
 import { detectDocType, extractDoc, rebuildDoc, docText, exportPdfDoc, DOC_EXT } from './features/doc/docParser.js';
 import { initImgWorkbench } from './features/img/imgWorkbench.js';
+import { collectFromDataTransfer, fromFileList, makeFileInput } from './features/shared/fsDrop.js';
+import { editBlockHtml, bindEditables, snapshotBases } from './features/shared/editView.js';
 
 /* ---------------- 基础 ---------------- */
 
@@ -58,6 +60,12 @@ function setView(view) {
   document.body.dataset.view = view;
   $$('#viewSwitch .ut-seg__item').forEach(b => b.classList.toggle('is-active', b.dataset.view === view));
   store.set('view', view);
+  // 切视图时退出编辑态，避免“点了没反应”的困惑
+  if (store.state.editing) {
+    store.state.editing = false;
+    const eb = $('#editToggle');
+    if (eb) eb.textContent = '编辑';
+  }
   // 已有内容时立即按新视图刷新当前文件
   if (store.state.units.length && !store.state.extracting && !store.state.translating) {
     renderFileContent(store.state.files, store.state.units);
@@ -379,7 +387,7 @@ $('#startTranslateBtn').addEventListener('click', async () => {
     try {
       const { text, encoding } = await readText(f.file);
       f.encoding = encoding;
-      const us = extractFile(text, f.path, encoding);
+      const us = extractFile(text, f.path, encoding, store.state.settings.targetLang);
       f.unitCount = us.length;
       units.push(...us);
     } catch (e) {
@@ -428,17 +436,32 @@ $('#viewSwitch').addEventListener('click', e => {
   if (b) setView(b.dataset.view);
 });
 
+// 逐条编辑开关：打开后预览变成可改的原文 / 译文两块
+$('#editToggle').addEventListener('click', () => {
+  const next = !store.state.editing;
+  store.state.editing = next;
+  $('#editToggle').textContent = next ? '完成' : '编辑';
+  renderFileContent(store.state.files, store.state.units);
+});
+
 /*（筛选与搜索已由文件内容视图取代，相关绑定已移除）*/
 
 /* ---------------- 游戏：导出 ---------------- */
 
 $('#exportBtn').addEventListener('click', async () => {
   const btn = $('#exportBtn');
+  const game = store.state.game;
+  const name = (game ? game.product || game.name : 'translated') + '_' + store.state.view + '.zip';
+  // 先弹保存框（需用户激活）；WebView2 里 a[download] 会被默默丢弃
+  const pick = await pickSaveFile(name);
+  if (pick.cancelled) return;
   btn.disabled = true;
   try {
-    const game = store.state.game;
-    const name = (game ? game.product || game.name : 'translated') + '_' + store.state.view;
-    const { warnings } = await exportZip(store.state.files, store.state.units, store.state.view, name + '.zip');
+    const saver = async (blob, fname) => {
+      if (pick.ok) await writeSaveHandle(pick.handle, blob);
+      else downloadBlob(blob, fname);
+    };
+    const { warnings } = await exportZip(store.state.files, store.state.units, store.state.view, name, saver);
     if (warnings && warnings.length) {
       alert('导出完成，但有以下提示：\n\n' + warnings.join('\n'));
     }
@@ -451,11 +474,17 @@ $('#exportBtn').addEventListener('click', async () => {
 
 $('#exportXp3Btn').addEventListener('click', async () => {
   const btn = $('#exportXp3Btn');
+  const game = store.state.game;
+  const name = (game ? game.product || game.name : 'translated') + '_translated.xp3';
+  const pick = await pickSaveFile(name);
+  if (pick.cancelled) return;
   btn.disabled = true;
   try {
-    const game = store.state.game;
-    const name = (game ? game.product || game.name : 'translated') + '_translated';
-    const { warnings } = await exportXp3(store.state.files, store.state.units, store.state.view, name + '.xp3');
+    const saver = async (blob, fname) => {
+      if (pick.ok) await writeSaveHandle(pick.handle, blob);
+      else downloadBlob(blob, fname);
+    };
+    const { warnings } = await exportXp3(store.state.files, store.state.units, store.state.view, name, saver);
     if (warnings && warnings.length) {
       alert('封包完成，但有以下提示：\n\n' + warnings.join('\n'));
     }
@@ -468,19 +497,41 @@ $('#exportXp3Btn').addEventListener('click', async () => {
 
 /* ---------------- 文档翻译 ---------------- */
 
-const docState = { files: [], units: [], view: 'bilingual', activeFile: null };
+const docState = { files: [], units: [], view: 'bilingual', activeFile: null, editing: false };
+let docEditUnits = [];   // 编辑视图当前渲染的单元数组
+
+const DOC_ACCEPT = '.md,.txt,.html,.htm,.docx,.epub,.xlsx,.pptx,.pdf';
+const isDocName = name => !!detectDocType(name);
 
 function docShowStage(name) {
   $$('#ws-document .ut-stage').forEach(s => { s.hidden = s.id !== 'doc-stage-' + name; });
 }
 
-async function docAddFiles(flist) {
+/** 加入文档。list 元素形如 {file, relPath}，relPath 带子目录前缀，用作唯一标识 */
+async function docAddFiles(list) {
   const files = [];
-  for (const f of flist) {
-    if (!detectDocType(f.name)) continue;
-    files.push({ name: f.name, file: f, size: f.size, type: detectDocType(f.name), unitCount: 0 });
+  const seen = new Set();
+  for (const item of list) {
+    if (!detectDocType(item.file.name)) continue;
+    // 不同子目录下可能出现同名文件，冲突时加序号保标识唯一
+    const rel = item.relPath || item.file.name;
+    let uniq = rel;
+    let k = 2;
+    while (seen.has(uniq)) uniq = rel + '#' + k++;
+    seen.add(uniq);
+    files.push({
+      name: item.file.name,
+      relPath: uniq,
+      file: item.file,
+      size: item.file.size,
+      type: detectDocType(item.file.name),
+      unitCount: 0,
+    });
   }
-  if (!files.length) { alert('不支持的文档格式（支持 md / txt / html / docx / epub / xlsx / pptx / pdf）'); return; }
+  if (!files.length) {
+    alert('没有找到支持的文档（支持 md / txt / html / docx / epub / xlsx / pptx / pdf）');
+    return;
+  }
   docState.files = files;
   docState.units = [];
   docRenderList();
@@ -491,8 +542,8 @@ function docRenderList() {
   $('#docScanTitle').textContent = `共 ${docState.files.length} 个文档`;
   $('#docFileList').innerHTML = docState.files.map(f => `
     <label class="ut-file-item">
-      <input type="checkbox" data-path="${escapeHtml(f.name)}" checked>
-      <span class="ut-file-item__name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+      <input type="checkbox" data-path="${escapeHtml(f.relPath)}" checked>
+      <span class="ut-file-item__name" title="${escapeHtml(f.relPath)}">${escapeHtml(f.name)}</span>
       <span class="ut-file-item__size">${fmtBytes(f.size)}</span>
     </label>`).join('') || '<p class="ut-muted">未添加文档</p>';
 }
@@ -500,10 +551,10 @@ function docRenderList() {
 function docRenderTree() {
   const el = $('#docFileTree');
   el.innerHTML = docState.files.map(f => {
-    const n = docState.units.filter(u => u.file === f.name).length;
-    const done = docState.units.filter(u => u.file === f.name && u.translated).length;
-    const active = f.name === docState.activeFile;
-    return `<div class="ut-file-node${active ? ' is-active' : ''}" data-doc="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">
+    const n = docState.units.filter(u => u.file === f.relPath).length;
+    const done = docState.units.filter(u => u.file === f.relPath && u.translated).length;
+    const active = f.relPath === docState.activeFile;
+    return `<div class="ut-file-node${active ? ' is-active' : ''}" data-doc="${escapeHtml(f.relPath)}" title="${escapeHtml(f.relPath)}">
       <span class="ut-file-node__name">${escapeHtml(f.name)}</span>
       <span class="ut-file-node__count">${n}${done ? ` / ${done}✓` : ''}</span>
     </div>`;
@@ -512,14 +563,51 @@ function docRenderTree() {
 
 function docRenderContent() {
   const el = $('#docContent');
-  const f = docState.files.find(x => x.name === docState.activeFile);
+  const f = docState.files.find(x => x.relPath === docState.activeFile);
   if (!f) {
+    el.classList.remove('is-editing');
+    docEditUnits = [];
     el.innerHTML = '<p class="ut-empty-small">选择左侧文档查看翻译结果</p>';
     return;
   }
-  const us = docState.units.filter(u => u.file === f.name);
+  const us = docState.units.filter(u => u.file === f.relPath).sort((a, b) => a.seq - b.seq);
+
+  // 编辑态：逐条渲染成可改的原文/译文两块
+  if (docState.editing) {
+    docEditUnits = us;
+    el.classList.add('is-editing');
+    el.innerHTML = us.map((u, i) => editBlockHtml({
+      index: i,
+      original: u.original,
+      translated: u.translated || '',
+      meta: u.error ? `<span style="color:var(--danger)">${escapeHtml(u.error)}</span>` : '',
+    })).join('') || '<p class="ut-empty-small">这个文件没有可编辑的文本</p>';
+    snapshotBases(el);
+    return;
+  }
+
+  el.classList.remove('is-editing');
+  docEditUnits = [];
   el.innerHTML = `<pre class="ut-file-content">${escapeHtml(docText(us, docState.view))}</pre>`;
 }
+
+function setDocEditing(on) {
+  docState.editing = on;
+  const btn = $('#docEditToggle');
+  if (btn) btn.textContent = on ? '完成' : '编辑';
+  docRenderContent();
+}
+
+// 编辑写回：直接改内存里的单元，导出时自然用新值
+bindEditables($('#docContent'), {
+  getUnits: () => docEditUnits,
+  onChange: () => {
+    docRenderTree();
+    docSyncExportEnabled(docState.units.some(u => u.translated));
+  },
+});
+
+$('#docEditToggle').addEventListener('click', () => setDocEditing(!docState.editing));
 
 const docDz = $('#docDropzone');
 docDz.addEventListener('dragover', e => { e.preventDefault(); docDz.classList.add('is-dragover'); });
@@ -527,25 +615,44 @@ docDz.addEventListener('dragleave', () => docDz.classList.remove('is-dragover'))
 docDz.addEventListener('drop', async e => {
   e.preventDefault();
   docDz.classList.remove('is-dragover');
-  if (e.dataTransfer && e.dataTransfer.files.length) await docAddFiles(Array.from(e.dataTransfer.files));
-});
-docDz.addEventListener('click', () => {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.multiple = true;
-  input.accept = '.md,.txt,.html,.htm,.docx,.epub,.xlsx,.pptx,.pdf';
-  input.onchange = async () => { if (input.files && input.files.length) await docAddFiles(Array.from(input.files)); };
-  input.click();
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  // 支持整个文件夹递归收集
+  const list = await collectFromDataTransfer(dt, isDocName);
+  if (list.length) await docAddFiles(list);
 });
 
+// 两个入口都在拖拽框内：点框 = 选文档（多选），点按钮 = 选整个文件夹
+const docFileInput = makeFileInput({
+  accept: DOC_ACCEPT,
+  multiple: true,
+  onFiles: files => docAddFiles(fromFileList(files, isDocName)),
+});
+const docDirInput = makeFileInput({
+  accept: DOC_ACCEPT,
+  directory: true,
+  onFiles: files => docAddFiles(fromFileList(files, isDocName)),
+});
+docDz.addEventListener('click', () => docFileInput.click());
+docDz.addEventListener('keydown', e => {
+  if (e.target.closest('button')) return;
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); docFileInput.click(); }
+});
+$('#docPickFiles').addEventListener('click', e => { e.stopPropagation(); docFileInput.click(); });
+$('#docPickFolder').addEventListener('click', e => { e.stopPropagation(); docDirInput.click(); });
+
 $('#docBackBtn').addEventListener('click', () => { docState.files = []; docState.units = []; docShowStage('import'); });
-$('#docViewBackBtn').addEventListener('click', () => docShowStage('scan'));
+$('#docViewBackBtn').addEventListener('click', () => {
+  if (docState.editing) setDocEditing(false);   // 返回重提时退出编辑态
+  docShowStage('scan');
+});
 
 $('#docTranslateBtn').addEventListener('click', async () => {
   const btn = $('#docTranslateBtn');
   btn.disabled = true;
   try {
     if (!docState.files.length) return;
+    if (docState.editing) setDocEditing(false);   // 重新提取前回到只读预览
     docShowStage('view');
     $('#docProgressWrap').hidden = false;
     const units = [];
@@ -553,16 +660,16 @@ $('#docTranslateBtn').addEventListener('click', async () => {
       const f = docState.files[i];
       $('#docProgressText').textContent = `提取 ${i + 1}/${docState.files.length}：${f.name}`;
       const forceOcr = (($('#docPdfMode .ut-seg__item.is-active') || {}).dataset || {}).mode === 'ocr';
-      const { units: us } = await extractDoc(f.file, f.name, msg => { $('#docProgressText').textContent = msg; }, forceOcr);
+      const { units: us } = await extractDoc(f.file, f.relPath, msg => { $('#docProgressText').textContent = msg; }, forceOcr);
       f.unitCount = us.length;
       units.push(...us);
     }
     docState.units = units;
-    docState.activeFile = (docState.files[0] || {}).name;
+    docState.activeFile = (docState.files[0] || {}).relPath;
     docRenderTree();
     docRenderContent();
     docSyncExportUi();
-    $('#docExportBtn').disabled = !units.length;
+    docSyncExportEnabled(units.length > 0);
     if (units.length) await docTranslateUnits();
   } catch (e) {
     alert('处理失败：' + e.message);
@@ -608,14 +715,17 @@ async function docTranslateUnits() {
     } else {
       // 翻译完成：保留进度条显示完成状态（不隐藏）
       const failed = units.filter(u => u.error).length;
+      const unchanged = units.filter(u => u.unchanged).length;
       $('#docProgressBar').style.width = docTrack() + 'px';
-      $('#docProgressText').textContent = failed > 0
-        ? `完成 ${units.length} / ${units.length} · 失败 ${failed}（100%）`
-        : `完成 ${units.length} / ${units.length}（100%）`;
+      const extra = [];
+      if (failed) extra.push(`失败 ${failed}`);
+      if (unchanged) extra.push(`${unchanged} 条原文已是目标语言`);
+      $('#docProgressText').textContent =
+        `完成 ${units.length} / ${units.length}` + (extra.length ? ' · ' + extra.join(' · ') : '') + '（100%）';
       stopBtn.hidden = true;
     }
     docRenderContent();
-    $('#docExportBtn').disabled = !units.some(u => u.translated);
+    docSyncExportEnabled(units.some(u => u.translated));
   }
 }
 
@@ -642,7 +752,8 @@ $('#docViewSwitch').addEventListener('click', e => {
   if (!b) return;
   docState.view = b.dataset.view;
   $$('#docViewSwitch .ut-seg__item').forEach(x => x.classList.toggle('is-active', x === b));
-  docRenderContent();
+  if (docState.editing) setDocEditing(false);   // 切视图时退出编辑
+  else docRenderContent();
 });
 
 function docPdfFiles() {
@@ -654,72 +765,32 @@ function docPdfKinds() {
   const kinds = new Set();
   for (const f of docState.files) {
     if (detectDocType(f.name) !== 'pdf') continue;
-    const us = docState.units.filter(u => u.file === f.name);
+    const us = docState.units.filter(u => u.file === f.relPath);
     kinds.add((us[0] && us[0].raw.pdfKind) || 'text');
   }
   return kinds;
 }
 
-/** 根据是否有 PDF 文件切换导出控件（普通导出 vs PDF 格式选择） */
+/** PDF 类型提示（导出格式与方式统一在导出面板里选） */
 function docSyncExportUi() {
   const hasPdf = docPdfFiles().length > 0;
-  $('#docExportBtn').hidden = hasPdf;
-  $('#docPdfFmt').hidden = !hasPdf;
   const hint = $('#docPdfOcrHint');
   if (hint) hint.hidden = true;
   if (!hasPdf) return;
   const kinds = docPdfKinds();
-  const hasText = kinds.has('text');
   const hasImage = kinds.has('image');
-  const hasOcr = kinds.has('ocr');
   const hasEmpty = kinds.has('empty');
-  // 导出格式按类型集合控制：PDF 所有类型都可用（原位嵌入），TXT 仅扫描/强制 OCR 可用
-  $$('#docPdfFmt [data-fmt]').forEach(btn => {
-    const fmt = btn.dataset.fmt;
-    btn.hidden = (fmt === 'txt' && !hasImage && !hasOcr);
-  });
   if (hasImage && hint) {
     hint.hidden = false;
     hint.textContent = hasEmpty
-      ? '含扫描版 / 空白 PDF：扫描版已按图片方式嵌入译文（PDF 导出），空白版无内容可导'
-      : '含扫描版 PDF：已 OCR 提取文字，PDF 导出将按图片方式嵌入译文';
+      ? '含扫描版 / 空白 PDF：选「PDF」格式可保持原排版，空白版无内容可导'
+      : '含扫描版 PDF：选「PDF」格式可保持原排版并嵌入译文';
   } else if (hasEmpty && hint) {
     hint.hidden = false;
     hint.textContent = '含空白 PDF：未识别到文字，无内容可导出';
   }
 }
 
-$$('#docPdfFmt [data-fmt]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const fmt = btn.dataset.fmt;
-    btn.disabled = true;
-    try {
-      const pdfs = docPdfFiles();
-      if (!pdfs.length) return;
-      // 单文件：点击瞬间先弹保存框拿句柄（showSaveFilePicker 需用户激活窗口内调用）
-      const single = pdfs.length === 1 ? await pickSaveFile('translated.' + fmt) : null;
-      for (const f of pdfs) {
-        const us = docState.units.filter(u => u.file === f.name);
-        const kind = (us[0] && us[0].raw.pdfKind) || 'text';
-        // 格式与类型匹配过滤：PDF 仅空白文档跳过，TXT 仅扫描/强制 OCR
-        if (fmt === 'pdf' && kind === 'empty') continue;
-        if (fmt === 'txt' && kind !== 'image' && kind !== 'ocr') continue;
-        if (!us.length) continue;
-        const tempId = (us[0] && us[0].raw.tempId) || '';
-        if (!tempId) continue;
-        const { blob, filename } = await exportPdfDoc(tempId, us, fmt);
-        if (single && single.ok) await writeSaveHandle(single.handle, blob);
-        else if (single && !single.cancelled) downloadBlob(blob, filename);   // pick 不可用：回退下载
-        else if (single && single.cancelled) continue;                       // 用户取消
-        else downloadBlob(blob, filename);                                   // 多文件：直接下载
-      }
-    } catch (e) {
-      alert('PDF 导出失败：' + e.message);
-    } finally {
-      btn.disabled = false;
-    }
-  });
-});
 
 // PDF 提取方式切换（文字层 / 图片 OCR）
 $('#docPdfMode').addEventListener('click', e => {
@@ -728,38 +799,222 @@ $('#docPdfMode').addEventListener('click', e => {
   $$('#docPdfMode .ut-seg__item').forEach(x => x.classList.toggle('is-active', x === b));
 });
 
-$('#docExportBtn').addEventListener('click', async () => {
-  const btn = $('#docExportBtn');
-  btn.disabled = true;
-  try {
-    // 单文件：点击瞬间先弹保存框拿句柄
-    const files = docState.files;
-    const single = files.length === 1 ? await pickSaveFile('translated' + (files[0] ? files[0].name.slice(files[0].name.lastIndexOf('.')) : '.txt')) : null;
-    let exported = 0;
-    for (const f of docState.files) {
-      if (detectDocType(f.name) === 'pdf') continue; // PDF 走 docPdfFmt 格式按钮
-      const us = docState.units.filter(u => u.file === f.name);
-      if (!us.length) continue;
-      const rebuilt = await rebuildDoc(f.file, f.name, us, docState.view);
-      let blob = rebuilt.blob;
-      if (!blob && rebuilt.text) blob = new Blob([rebuilt.text], { type: 'text/plain;charset=utf-8' });
-      if (!blob) continue;
-      const dot = f.name.lastIndexOf('.');
-      const base = dot > 0 ? f.name.slice(0, dot) : f.name;
-      const outName = base + '_译文' + f.name.slice(dot);
-      if (single && single.ok) await writeSaveHandle(single.handle, blob);
-      else if (single && !single.cancelled) downloadBlob(blob, outName);
-      else if (single && single.cancelled) continue;
-      else downloadBlob(blob, outName);
-      exported++;
+/** 导出按钮启用状态 */
+function docSyncExportEnabled(enabled) {
+  const el = $('#docExportBtn');
+  if (el) el.disabled = !enabled;
+}
+
+/** 译文文件名：单体导入保持原名，来自文件夹的用扁平路径防同名覆盖 */
+function docOutName(f, forceExt) {
+  const dot = f.name.lastIndexOf('.');
+  const stem = dot > 0 ? f.name.slice(0, dot) : f.name;
+  const ext = forceExt || (dot > 0 ? f.name.slice(dot) : '');
+  const flat = f.relPath === f.name ? stem : f.relPath.replace(/\.[^.]+$/, '').replace(/[\\/]+/g, '_');
+  return flat + '_译文' + ext;
+}
+
+/** 单文件跨格式转换：文本类前端拼，docx / pdf 交后端生成 */
+async function docConvert(us, fmt) {
+  const sorted = us.slice().sort((a, b) => a.seq - b.seq);
+  if (fmt === 'txt' || fmt === 'md') {
+    const text = docText(sorted, docState.view);
+    return new Blob([text], {
+      type: fmt === 'md' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8',
+    });
+  }
+  if (fmt === 'html') {
+    const body = sorted.map(u => {
+      const t = docState.view === 'original' ? u.original
+        : docState.view === 'translated' ? (u.translated || u.original)
+          : u.original + ' / ' + (u.translated || '');
+      return '<p>' + escapeHtml(t).replace(/\n/g, '<br>') + '</p>';
+    }).join('\n');
+    const html = '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+      + '<title>译文</title>\n<style>body{font-family:"Microsoft YaHei",sans-serif;'
+      + 'line-height:1.75;max-width:820px;margin:40px auto;padding:0 20px;color:#222}</style>\n'
+      + '</head>\n<body>\n' + body + '\n</body>\n</html>';
+    return new Blob([html], { type: 'text/html;charset=utf-8' });
+  }
+  // docx / pdf：后端用 python-docx / pymupdf 生成
+  const res = await fetch('/api/doc/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fmt,
+      units: sorted.map(u => ({ original: u.original, translated: u.translated || '' })),
+    }),
+  });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    throw new Error((d && d.error) || ('导出失败 HTTP ' + res.status));
+  }
+  return await res.blob();
+}
+
+/**
+ * 生成全部产出
+ * @param {string} fmt keep=原格式 / txt / md / html / docx / pdf
+ */
+async function docBuildOutputs(fmt, onProgress) {
+  const out = [];
+  const used = new Set();
+  const files = docState.files;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (onProgress) onProgress(i, files.length, '生成');
+    const us = docState.units.filter(u => u.file === f.relPath).sort((a, b) => a.seq - b.seq);
+    if (!us.length) continue;
+    const isPdf = detectDocType(f.name) === 'pdf';
+    const tempId = (us[0].raw && us[0].raw.tempId) || '';
+    let blob = null;
+    let name = '';
+    try {
+      if (fmt === 'keep') {
+        if (isPdf) {
+          if (!tempId) continue;
+          const r = await exportPdfDoc(tempId, us, 'docx');
+          blob = r.blob;
+          name = docOutName(f, '.docx');
+        } else {
+          const rebuilt = await rebuildDoc(f.file, f.relPath, us, docState.view);
+          blob = rebuilt.blob || (rebuilt.text ? new Blob([rebuilt.text], { type: 'text/plain;charset=utf-8' }) : null);
+          name = docOutName(f);
+        }
+      } else if (fmt === 'pdf' && isPdf && tempId) {
+        // PDF 源 + PDF 目标：原位嵌入，保持原排版
+        const r = await exportPdfDoc(tempId, us, 'pdf');
+        blob = r.blob;
+        name = docOutName(f, '.pdf');
+      } else {
+        blob = await docConvert(us, fmt);
+        name = docOutName(f, '.' + fmt);
+      }
+    } catch (e) {
+      console.warn('导出失败:', f.relPath, e);
+      continue;
     }
-    if (!exported) alert('没有可导出的内容');
+    if (!blob) continue;
+    let fname = name;
+    let k = 2;
+    while (used.has(fname)) fname = name.replace(/(\.[^.]+)$/, '_' + (k++) + '$1');
+    used.add(fname);
+    out.push({ name: fname, blob });
+  }
+  if (onProgress) onProgress(files.length, files.length, '生成');
+  return out;
+}
+
+/* ---------------- 导出面板：格式 × 方式 ---------------- */
+
+docState.exportFmt = 'keep';
+docState.exportMode = 'files';
+
+function docSyncExportHint() {
+  const hint = $('#docExportHint');
+  if (!hint) return;
+  const fmt = docState.exportFmt;
+  if (fmt === 'keep') hint.textContent = '每个文件按原有格式与排版导出（PDF 源生成 Word）';
+  else if (fmt === 'pdf') hint.textContent = 'PDF 源文件保持原排版；其他文件按文本重排';
+  else hint.textContent = '跨格式导出只保留文字，标题层级与表格结构会丢失';
+}
+
+$('#docExportBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  const pop = $('#docExportPop');
+  if (!pop) return;
+  pop.hidden = !pop.hidden;
+  if (!pop.hidden) docSyncExportHint();
+});
+
+// 点面板与按钮以外的地方收起
+document.addEventListener('click', e => {
+  const pop = $('#docExportPop');
+  if (!pop || pop.hidden) return;
+  if (e.target.closest('#docExportPop') || e.target.closest('#docExportBtn')) return;
+  pop.hidden = true;
+});
+
+$('#docFmtOpts').addEventListener('click', e => {
+  const b = e.target.closest('.ut-chip');
+  if (!b) return;
+  docState.exportFmt = b.dataset.fmt;
+  $$('#docFmtOpts .ut-chip').forEach(x => x.classList.toggle('is-active', x === b));
+  docSyncExportHint();
+});
+
+$('#docModeOpts').addEventListener('click', e => {
+  const b = e.target.closest('.ut-chip');
+  if (!b) return;
+  docState.exportMode = b.dataset.mode;
+  $$('#docModeOpts .ut-chip').forEach(x => x.classList.toggle('is-active', x === b));
+});
+
+$('#docExportGo').addEventListener('click', async () => {
+  const pop = $('#docExportPop');
+  if (pop) pop.hidden = true;
+  await docExportRun();
+});
+
+async function docExportRun() {
+  const fmt = docState.exportFmt;
+  const mode = docState.exportMode;
+  const btn = $('#docExportBtn');
+  const wrap = $('#docProgressWrap');
+  const zipName = '译文文档.zip';
+
+  // 先弹保存位置：必须在用户激活窗口内调用，否则会被拒
+  let pick = null;
+  let dirPick = null;
+  if (mode === 'zip') {
+    pick = await pickSaveFile(zipName);
+    if (pick.cancelled) return;
+  } else {
+    dirPick = await pickDirectory();
+    if (dirPick.cancelled) return;
+    if (!dirPick.ok) { alert('无法选择保存目录，导出已取消'); return; }
+  }
+
+  const track = () => Math.max(0, wrap ? wrap.clientWidth - 48 : 0);
+  const setP = (i, total, label) => {
+    if (!wrap) return;
+    const p = total ? Math.round(i / total * 100) : 100;
+    $('#docProgressBar').style.width = Math.round(track() * p / 100) + 'px';
+    $('#docProgressText').textContent = label + ' ' + i + ' / ' + total + '（' + p + '%）';
+  };
+
+  btn.disabled = true;
+  if (wrap) {
+    wrap.hidden = false;
+    $('#docProgressBar').style.width = '0px';
+    setP(0, docState.files.length, '生成');
+  }
+  try {
+    const outputs = await docBuildOutputs(fmt, setP);
+    if (!outputs.length) { alert('没有可导出的内容'); return; }
+    if (mode === 'zip') {
+      const zip = new window.JSZip();
+      for (const o of outputs) zip.file(o.name, o.blob);
+      const blob = await zip.generateAsync({ type: 'blob' });
+      if (pick.ok) await writeSaveHandle(pick.handle, blob);
+      else downloadBlob(blob, zipName);
+      setP(outputs.length, outputs.length, '完成');
+    } else {
+      let i = 0;
+      for (const o of outputs) {
+        await writeDirFile(dirPick.handle, o.name, o.blob);
+        i++;
+        setP(i, outputs.length, '写入');
+      }
+    }
   } catch (e) {
     alert('导出失败：' + e.message);
   } finally {
     btn.disabled = false;
+    setTimeout(() => { if (wrap) wrap.hidden = true; }, 1200);
   }
-});
+}
+
 
 $('#clearCacheBtn').addEventListener('click', async () => {
   const btn = $('#clearCacheBtn');
@@ -770,6 +1025,21 @@ $('#clearCacheBtn').addEventListener('click', async () => {
   st.textContent = ok ? '✓ 已清除' : '清除失败';
   st.style.color = ok ? 'var(--ok)' : 'var(--danger)';
   setTimeout(() => { st.textContent = ''; }, 2500);
+});
+
+// 赞助入口：WebView2 内直接跳外链会把页面顶掉，统一交后端用系统浏览器打开
+$('#supportBtn').addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/open-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://afdian.com/a/match0121' }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!d.ok) alert('打开失败：' + (d.error || ('HTTP ' + res.status)));
+  } catch (e) {
+    alert('打开失败：' + e.message);
+  }
 });
 
 /* ---------------- 设置抽屉 ---------------- */
@@ -828,6 +1098,11 @@ applyThemeIcon();
 
 $('#backBtn').addEventListener('click', () => {
   // 返回扫描阶段，翻译结果保留在状态里，重新提取会走翻译缓存（IndexedDB）
+  if (store.state.editing) {
+    store.state.editing = false;
+    const eb = $('#editToggle');
+    if (eb) eb.textContent = '编辑';
+  }
   showStage('scan');
   renderFileList(store.state.files);
   bindFileList();

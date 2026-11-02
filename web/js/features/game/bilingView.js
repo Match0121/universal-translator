@@ -5,6 +5,7 @@ import { $, escapeHtml, fmtBytes } from '../../utils.js';
 import { store } from '../../store.js';
 import { rebuild } from './exporter.js';
 import { readText } from './encoding.js';
+import { editBlockHtml, bindEditables, snapshotBases } from '../shared/editView.js';
 
 /* ---------- 文件列表（扫描阶段） ---------- */
 
@@ -43,9 +44,12 @@ export function renderFileTree(files, units) {
 
 /* ---------- 文件内容视图（浏览阶段主区域） ---------- */
 
+let editUnits = [];   // 编辑视图当前渲染的单元数组（写回时靠下标定位）
+
 /**
  * 渲染当前选中文件的翻译后完整内容
  * 视图模式由 store.state.view 决定：original=原文 / translated=译文 / bilingual=原文（译文）
+ * store.state.editing 为真时改为逐条可编辑（原文 / 译文各一块）
  */
 export async function renderFileContent(files, units) {
   const el = $('#unitList');
@@ -53,10 +57,31 @@ export async function renderFileContent(files, units) {
     const activePath = store.state.activeFile;
     const file = files.find(f => f.path === activePath && !f.skipped);
     if (!file) {
+      el.classList.remove('is-editing');
+      editUnits = [];
       el.innerHTML = '<p class="ut-empty-small">选择左侧文件查看翻译结果<br><span class="ut-muted">或回到上一步提取文本</span></p>';
       return;
     }
-    const fileUnits = units.filter(u => u.file === file.path);
+    const fileUnits = units
+      .filter(u => u.file === file.path)
+      .sort((a, b) => (a.lineIndex - b.lineIndex) || ((a.occurrence || 0) - (b.occurrence || 0)));
+
+    // 编辑态：逐条渲染成可改的原文 / 译文两块
+    if (store.state.editing) {
+      el.classList.add('is-editing');
+      editUnits = fileUnits;
+      el.innerHTML = fileUnits.map((u, i) => editBlockHtml({
+        index: i,
+        original: u.original,
+        translated: u.translated || '',
+        meta: `第 ${(u.lineIndex || 0) + 1} 行${u.error ? ' · ' + escapeHtml(u.error) : ''}`,
+      })).join('') || '<p class="ut-empty-small">这个文件没有可编辑的文本</p>';
+      snapshotBases(el);
+      return;
+    }
+
+    el.classList.remove('is-editing');
+    editUnits = [];
     const { text } = await readText(file.file);
     const mode = store.state.view;
     const content = mode === 'original' ? text : rebuild(text, fileUnits, mode);
@@ -66,6 +91,14 @@ export async function renderFileContent(files, units) {
     el.innerHTML = '<p class="ut-muted" style="color:var(--danger)">渲染错误: ' + escapeHtml(e.message) + '</p>';
   }
 }
+
+// 编辑写回：直接改内存单元，导出/封包时自然用新值
+bindEditables($('#unitList'), {
+  getUnits: () => editUnits,
+  onChange: () => {
+    renderFileTree(store.state.files, store.state.units);
+  },
+});
 
 /* ---------- 进度 ---------- */
 

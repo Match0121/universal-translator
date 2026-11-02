@@ -17,7 +17,10 @@ from collections import Counter
 
 import pymupdf
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+from docx.enum.style import WD_STYLE_TYPE
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -475,8 +478,8 @@ def export_pdf_overlay(src_bytes, paras, translated_map):
                 if not rects:
                     continue
                 text = (translated_map.get(p['seq']) or '').strip()
-                if not text or text == p.get('original'):
-                    continue        # 未翻译：原图原文保留
+                if not text:
+                    text = p.get('original') or ''   # 未翻译：雅黑重绘原文，绕开残缺源字体
                 x0 = min(r[0] for r in rects) * scale
                 y0 = min(r[1] for r in rects) * scale
                 x1 = max(r[2] for r in rects) * scale
@@ -517,16 +520,37 @@ def export_pdf_inline(src_bytes, paras, translated_map):
         # ---- 1) 采样背景色 + 擦除原文（用背景色填充，深色卡片不露白块）----
         bg_cache = {}        # ((page, rect_tuple)) -> (r,g,b)
         page_bgs = {}        # page_index -> 整页主色
-        # 只处理「有译文」的段落；未翻译（译文缺失/与原文相同）保留原文，不擦不写
+        # 所有段落统一处理：有译文用译文，没译文用雅黑重绘原文
+        # （源 PDF 内嵌字体可能是残缺子集，保留原文会渲染成方框，重绘绕开）
         todo = []
         for p in paras:
-            text = (translated_map.get(p['seq']) or '').strip()
-            if not text or text == p.get('original'):
-                continue
             rects = p.get('rects') or p.get('boxes') or []
             if not rects:
                 continue
+            text = (translated_map.get(p['seq']) or '').strip()
+            if not text:
+                text = p.get('original') or ''
             todo.append((p, text, rects))
+        # 兜底：收集页面中仍使用“非雅黑字体”的零散 span（被噪音过滤的行/残留），
+        # 一并擦除并重绘为雅黑，避免残缺源字体渲染成方框
+        fallback_spans = []
+        for _pno, _pg in enumerate(doc):
+            _raw = _pg.get_text('rawdict')
+            for _block in _raw.get('blocks', []):
+                if _block.get('type', 0) != 0:
+                    continue
+                for _line in _block.get('lines', []):
+                    for _span in _line.get('spans', []):
+                        _fname = _span.get('font', '')
+                        if 'aHei' in _fname or 'ut-main' in _fname:
+                            continue
+                        _t = (_span.get('text') or '').strip()
+                        if not _t:
+                            continue
+                        _bb = _span.get('bbox')
+                        if not _bb:
+                            continue
+                        fallback_spans.append((_pno, _bb, _t, _span.get('size', 10)))
         for p, _text, rects in todo:
             pi = p.get('page', 0)
             pg = doc[pi]
@@ -543,9 +567,33 @@ def export_pdf_inline(src_bytes, paras, translated_map):
                 rr.x1 += 2
                 rr.y1 += 2
                 pg.add_redact_annot(rr, fill=bg)
+        for _pno, _bb, _t, _size in fallback_spans:
+            _pg2 = doc[_pno]
+            _r2 = pymupdf.Rect(*_bb)
+            _r2.x0 -= 2
+            _r2.y0 -= 2
+            _r2.x1 += 2
+            _r2.y1 += 2
+            _pg2.add_redact_annot(_r2, fill=(1.0, 1.0, 1.0))
         for pg in doc:
             pg.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)   # 保护整页图（扫描件）
         # ---- 2) 写译文（颜色按背景反色）----
+        for _pno, _bb, _t, _size in fallback_spans:
+            _pg3 = doc[_pno]
+            _r3 = pymupdf.Rect(*_bb)
+            _w3 = _r3.width
+            _h3 = _r3.height
+            _fs3 = max(6, min(_size, _h3 * 1.6))
+            if _w3 < 3 or _h3 < 2:
+                continue
+            _tw3 = _MEASURE_FONT.text_length(_t, fontsize=_fs3)
+            if _tw3 > _w3 + 2 and _fs3 > 6:
+                _fs3 = max(6, _fs3 * (_w3 / _tw3))
+            _col3 = _text_color((1.0, 1.0, 1.0))
+            _pg3.insert_text((_r3.x0 + (_w3 - _MEASURE_FONT.text_length(_t, fontsize=_fs3)) / 2,
+                              _r3.y0 + _r3.height / 2 + _fs3 * 0.35),
+                             _t, fontsize=_fs3, color=_col3,
+                             fontname=MAIN_FONT_NAME, fontfile=MAIN_FONT_FILE)
         for p, text, rects in todo:
             pg = doc[p.get('page', 0)]
             x0 = min(r[0] for r in rects)
@@ -579,6 +627,68 @@ def export_pdf_inline(src_bytes, paras, translated_map):
 
 # ---------------- 导出 ----------------
 
+DOCX_FONT = 'Microsoft YaHei'   # 中英一体：西文与中文同一字体，避免混排出现两种字
+
+
+def _lock_rfonts(rpr):
+    """在 rPr 上写死三通道字体，并清掉主题字体引用。
+
+    ascii/hAnsi 管西文，eastAsia 管中文，缺一个就会漏一系字。
+    asciiTheme 等属性按 OOXML 规范优先于显式字体，不删掉则不生效。
+    """
+    rfonts = rpr.find(qn('w:rFonts'))
+    if rfonts is None:
+        rfonts = OxmlElement('w:rFonts')
+        rstyle = rpr.find(qn('w:rStyle'))
+        rpr.insert(1 if rstyle is not None else 0, rfonts)
+    rfonts.set(qn('w:ascii'), DOCX_FONT)
+    rfonts.set(qn('w:hAnsi'), DOCX_FONT)
+    rfonts.set(qn('w:eastAsia'), DOCX_FONT)
+    for attr in ('w:asciiTheme', 'w:hAnsiTheme', 'w:eastAsiaTheme', 'w:cstheme'):
+        key = qn(attr)
+        if rfonts.get(key) is not None:
+            del rfonts.attrib[key]
+
+
+def _unify_docx_style(wd):
+    """把输出 docx 的字体统一成微软雅黑、颜色统一成纯黑。
+
+    python-docx 默认模板一个字体都不写，Word 打开时全部按主题字体渲染：
+    标题 Calibri Light、正文 Calibri、中文再回退到本机东亚字体（等线/宋体），
+    同一份文档因此出现多种字体，换台机器显示还会变。
+    这里把默认字体、段落样式、字符样式全部显式锁死；表格样式的配色不动。
+    """
+    # 1) 全局默认：表格内文字、页眉页脚等没有显式样式的元素也走同一字体
+    try:
+        dd = wd.styles.element.find(qn('w:docDefaults'))
+        rprdef = dd.find(qn('w:rPrDefault')) if dd is not None else None
+        rpr = rprdef.find(qn('w:rPr')) if rprdef is not None else None
+        if rpr is not None:
+            _lock_rfonts(rpr)
+            lang = rpr.find(qn('w:lang'))
+            if lang is not None:
+                lang.set(qn('w:eastAsia'), 'zh-CN')   # 中文按中文规则排版
+    except Exception:
+        pass
+
+    # 2) 段落样式 + 字符样式（Heading1Char / TitleChar / Subtitle 等也要盖住，
+    #    否则在 Word 里继续编辑时标题会重新变回主题字体和主题色）
+    for st in wd.styles:
+        if st.type not in (WD_STYLE_TYPE.PARAGRAPH, WD_STYLE_TYPE.CHARACTER):
+            continue
+        st.font.name = DOCX_FONT                 # 写入西文 ascii / hAnsi 通道
+        st.font.color.rgb = RGBColor(0, 0, 0)    # 纯黑，同时清掉主题色
+        _lock_rfonts(st.element.get_or_add_rPr())
+
+    # 3) 表格等样式只锁字体不动配色：带颜文字的前提是字体一致，
+    #    而斑马纹/底纹是 Word 表格的可读性设计，不碰。
+    #    这些字体引用嵌套在 tblStylePr 条件格式里，要逐层找 rPr。
+    for st in wd.styles:
+        if st.type is not WD_STYLE_TYPE.TABLE:
+            continue
+        for rpr in st.element.iter(qn('w:rPr')):
+            _lock_rfonts(rpr)
+
 def export_translated(original_paras, translated_paras, fmt, src_bytes=None):
     """按 fmt 生成译文文档，返回 (bytes, filename, mime)
     original_paras: [{seq|idx, original}]；translated_paras: [{idx, translated}]
@@ -609,6 +719,7 @@ def export_translated(original_paras, translated_paras, fmt, src_bytes=None):
 
     if fmt == 'docx':
         wd = Document()
+        _unify_docx_style(wd)
         wd.add_heading('译文文档', 0)
         for item in ordered:
             if item['title']:

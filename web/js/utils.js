@@ -91,6 +91,28 @@ export async function writeSaveHandle(handle, blob) {
   await writable.close();
 }
 
+/** 选一个目录（多文件导出用）。必须在点击事件的首拍调用，否则会失用户激活 */
+export async function pickDirectory() {
+  try {
+    if (window.showDirectoryPicker) {
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      return { ok: true, handle };
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return { ok: false, cancelled: true };
+    return { ok: false, error: e };
+  }
+  return { ok: false };
+}
+
+/** 把 blob 写入目录句柄下的指定文件名 */
+export async function writeDirFile(dirHandle, name, blob) {
+  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(blob);
+  await w.close();
+}
+
 /** 把字符串里第 n 次（0 起）出现的 from 替换为 to */
 export function replaceNth(s, from, to, n) {
   let idx = -1, count = 0;

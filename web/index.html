@@ -14,7 +14,7 @@
   <div class="ut-brand">
     <span class="ut-brand__mark">译</span>
     <span class="ut-brand__name">万能翻译站</span>
-    <span class="ut-brand__ver">v1.3.0</span>
+    <span class="ut-brand__ver">v1.4.1</span>
   </div>
   <nav class="ut-nav" id="mainNav">
     <button class="ut-nav__item is-active" data-ws="document" type="button">文档</button>
@@ -43,9 +43,13 @@
           <div class="ut-dropzone__icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h5M10 16h5"/></svg>
           </div>
-          <p class="ut-dropzone__title">拖入文档，或点击选择</p>
+          <p class="ut-dropzone__title">拖入文档或整个文件夹</p>
           <p class="ut-dropzone__hint">支持 Word / Excel / PPT / PDF / EPUB / HTML / Markdown / TXT</p>
           <p class="ut-dropzone__hint" id="docEngineStatus"></p>
+          <div class="ut-dropzone__actions">
+            <button class="ut-btn ut-btn--ghost ut-btn--sm" id="docPickFiles" type="button">选择文档</button>
+            <button class="ut-btn ut-btn--ghost ut-btn--sm" id="docPickFolder" type="button">选择文件夹</button>
+          </div>
         </div>
       </div>
     </div>
@@ -82,13 +86,33 @@
           <button class="ut-seg__item" data-view="translated" type="button">仅译文</button>
         </div>
         <div class="ut-toolbar__spacer"></div>
-        <button class="ut-btn ut-btn--primary" id="docExportBtn" type="button">导出译文文档</button>
-        <div id="docPdfFmt" class="ut-doc-pdf-fmt" hidden>
-          <span class="ut-doc-pdf-fmt__label">PDF 导出为：</span>
-          <button class="ut-btn ut-btn--ghost" data-fmt="docx" type="button">Word</button>
-          <button class="ut-btn ut-btn--ghost" data-fmt="md" type="button">Markdown</button>
-          <button class="ut-btn ut-btn--ghost" data-fmt="txt" type="button" title="扫描版 PDF 无文字层，导出纯文字">TXT</button>
-          <button class="ut-btn ut-btn--ghost" data-fmt="pdf" type="button" title="保持原排版：原文位置擦除并嵌入译文（文本型直接替换，扫描件按图片方式嵌入）">PDF</button>
+        <button class="ut-btn ut-btn--ghost" id="docEditToggle" type="button" title="逐条修改原文与译文">编辑</button>
+        <div class="ut-export-wrap">
+          <button class="ut-btn ut-btn--primary" id="docExportBtn" type="button" disabled>导出</button>
+          <div class="ut-export-pop" id="docExportPop" hidden>
+            <div class="ut-export-pop__group">
+              <span class="ut-export-pop__label">格式</span>
+              <div class="ut-export-pop__opts" id="docFmtOpts">
+                <button class="ut-chip is-active" data-fmt="keep" type="button">原格式</button>
+                <button class="ut-chip" data-fmt="txt" type="button">TXT</button>
+                <button class="ut-chip" data-fmt="md" type="button">Markdown</button>
+                <button class="ut-chip" data-fmt="html" type="button">HTML</button>
+                <button class="ut-chip" data-fmt="docx" type="button">Word</button>
+                <button class="ut-chip" data-fmt="pdf" type="button">PDF</button>
+              </div>
+            </div>
+            <div class="ut-export-pop__group">
+              <span class="ut-export-pop__label">方式</span>
+              <div class="ut-export-pop__opts" id="docModeOpts">
+                <button class="ut-chip is-active" data-mode="files" type="button">逐个写入文件夹</button>
+                <button class="ut-chip" data-mode="zip" type="button">打包 ZIP</button>
+              </div>
+            </div>
+            <p class="ut-export-pop__hint" id="docExportHint"></p>
+            <div class="ut-export-pop__foot">
+              <button class="ut-btn ut-btn--primary" id="docExportGo" type="button">开始导出</button>
+            </div>
+          </div>
         </div>
         <div id="docPdfOcrHint" class="ut-doc-pdf-hint" hidden></div>
       </div>
@@ -179,6 +203,7 @@
           <button class="ut-chip" data-filter="translated" type="button">已翻译</button>
         </div>
         <input class="ut-search" id="searchInput" type="search" placeholder="搜索原文或译文" hidden>
+        <button class="ut-btn ut-btn--ghost" id="editToggle" type="button" title="逐条修改原文与译文">编辑</button>
         <button class="ut-btn ut-btn--primary" id="exportBtn" type="button" disabled>导出</button>
         <button class="ut-btn" id="exportXp3Btn" type="button" hidden>封包为 xp3</button>
       </div>
@@ -197,40 +222,72 @@
 
   </section>
 
-  <!-- 图片工作台 -->
+  <!-- 图片工作台（批量） -->
   <section class="ut-workspace" id="ws-image" hidden>
-    <!-- 阶段 1：拖入图片 -->
+    <!-- 阶段 1：拖入图片 / 文件夹（两个选择入口合并到框内） -->
     <div class="ut-stage" id="img-stage-import">
       <div class="ut-dropzone" id="imgDropzone" tabindex="0" role="button">
         <div class="ut-dropzone__inner">
           <div class="ut-dropzone__icon">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4.5" width="18" height="15" rx="3"/><circle cx="8.8" cy="9.2" r="1.8" fill="currentColor" stroke="none"/><path d="m5.5 17 4.5-4.5 3.2 3.2 2.3-2.3 3 3"/></svg>
           </div>
-          <p class="ut-dropzone__title">拖入图片，或点击选择</p>
+          <p class="ut-dropzone__title">拖入图片或整个文件夹</p>
           <p class="ut-dropzone__hint">支持 PNG / JPG / WebP / BMP</p>
           <p class="ut-dropzone__hint" id="imgEngineStatus"></p>
+          <div class="ut-dropzone__actions">
+            <button class="ut-btn ut-btn--ghost ut-btn--sm" id="imgPickImages" type="button">选择图片</button>
+            <button class="ut-btn ut-btn--ghost ut-btn--sm" id="imgPickDir" type="button">选择文件夹</button>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 阶段 2：查看 + 翻译 + 导出 -->
+    <!-- 阶段 2：选择要处理的图片 -->
+    <div class="ut-stage" id="img-stage-select" hidden>
+      <div class="ut-stage-head">
+        <div class="ut-stage-head__left">
+          <button class="ut-btn ut-btn--ghost" id="imgBackBtn" type="button"><svg class="icon icon--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m15 18-6-6 6-6"/></svg>返回</button>
+          <h2 class="ut-stage-title" id="imgScanTitle">共 0 张图片</h2>
+        </div>
+        <div class="ut-stage-actions">
+          <span class="ut-muted" id="imgScanSummary"></span>
+          <label class="ut-check"><input type="checkbox" id="imgCheckAll" checked> 全选</label>
+          <button class="ut-btn ut-btn--primary" id="imgStartBtn" type="button">开始识别并翻译</button>
+        </div>
+      </div>
+      <div class="ut-file-list" id="imgFileList"></div>
+      <div class="ut-progress" id="imgProgressWrapS" hidden>
+        <div class="ut-progress__bar" id="imgProgressBarS"></div>
+        <div class="ut-progress__row">
+          <span class="ut-progress__text" id="imgProgressTextS"></span>
+          <button class="ut-btn ut-btn--ghost" id="imgStopBtnS" type="button" hidden>停止</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 阶段 3：识别 + 翻译结果（按文本平铺，行首带所属图片缩略图） -->
     <div class="ut-stage" id="img-stage-view" hidden>
       <div class="ut-toolbar">
-        <button class="ut-btn ut-btn--ghost" id="imgBackBtn" type="button"><svg class="icon icon--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m15 18-6-6 6-6"/></svg>返回</button>
+        <button class="ut-btn ut-btn--ghost" id="imgViewBackBtn" type="button"><svg class="icon icon--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m15 18-6-6 6-6"/></svg>返回</button>
         <div class="ut-seg" id="imgViewSwitch">
-          <button class="ut-seg__item is-active" data-view="original" type="button">仅原文</button>
-          <button class="ut-seg__item" data-view="bilingual" type="button">对照</button>
+          <button class="ut-seg__item" data-view="original" type="button">仅原文</button>
+          <button class="ut-seg__item is-active" data-view="bilingual" type="button">对照</button>
           <button class="ut-seg__item" data-view="translated" type="button">仅译文</button>
         </div>
         <div class="ut-toolbar__spacer"></div>
-        <button class="ut-btn ut-btn--ghost" id="imgExportTxt" type="button" title="导出识别与翻译的文字（TXT）">TXT</button>
-        <button class="ut-btn ut-btn--ghost" id="imgExportMd" type="button" title="导出识别与翻译的文字（Markdown）">Markdown</button>
-        <button class="ut-btn ut-btn--primary" id="imgExportImg" type="button" title="按当前视图合成标注图下载">导出标注图</button>
+        <button class="ut-btn ut-btn--ghost" id="imgEditToggle" type="button" title="逐条修改原文与译文">编辑</button>
+        <label class="ut-check"><input type="checkbox" id="imgWithText"> 同时导出文本对照</label>
+        <button class="ut-btn ut-btn--ghost" id="imgExportFiles" type="button" title="选一个文件夹，逐张写入覆盖图" disabled>导出多图</button>
+        <button class="ut-btn ut-btn--primary" id="imgExportZip" type="button" title="打包为 ZIP" disabled>导出 ZIP</button>
       </div>
-      <div class="ut-img-wrap">
-        <canvas id="imgCanvas"></canvas>
-        <p class="ut-muted" id="imgMeta"></p>
+      <p class="ut-muted" id="imgRowsMeta"></p>
+      <div class="ut-imgfails" id="imgFailList" hidden></div>
+      <!-- 单图覆盖图预览：点列表缩略图放大查看，返回按钮回列表 -->
+      <div class="ut-img-preview" id="imgOverlayWrap" hidden>
+        <p class="ut-muted" id="imgOverlayMeta"></p>
+        <img id="imgOverlayImg" alt="覆盖图预览">
       </div>
+      <div class="ut-imgrows" id="imgRows" data-view="bilingual"></div>
       <div class="ut-progress" id="imgProgressWrap" hidden>
         <div class="ut-progress__bar" id="imgProgressBar"></div>
         <div class="ut-progress__row">
@@ -300,6 +357,11 @@
       <span>翻译缓存</span>
       <button class="ut-btn ut-btn--ghost" id="clearCacheBtn" type="button">清除翻译缓存</button>
       <p class="ut-field__status" id="cacheStatus"></p>
+      <div class="ut-mark" aria-hidden="true">
+        <img class="ut-mark__img ut-mark__img--on-light" src="assets/match-lockup-on-light.png" alt="">
+        <img class="ut-mark__img ut-mark__img--on-dark" src="assets/match-lockup-on-dark.png" alt="">
+      </div>
+      <button class="ut-support" id="supportBtn" type="button">觉得有用？请我喝杯奶茶 →</button>
     </div>
 
     <div class="ut-drawer__help">
@@ -313,7 +375,7 @@
           <ul>
             <li>文本文件：txt / md / json / yaml / ini / cfg / srt / ass 等</li>
             <li>文档：Word / Excel / PPT / EPUB / HTML / PDF（PDF 自动分类：文字层直接提取，扫描件走 OCR）</li>
-            <li>图片：PNG / JPG / WebP / BMP（识别图中文字并翻译，可导出译文标注图）</li>
+            <li>图片：PNG / JPG / WebP / BMP（批量识别图中文字并翻译，导出译文覆盖图）</li>
             <li>游戏剧本：rpy（Ren'Py 引擎）、ks（吉里吉里引擎，支持日文「」引号）</li>
             <li>资源包：吉里吉里 xp3（可解包翻译后重新封包；加密包不支持）</li>
             <li>编码自动识别：UTF-8 / UTF-16 / Shift-JIS（日文）/ GBK（中文）</li>
@@ -321,23 +383,28 @@
           </ul>
           <h4>文档 / PDF</h4>
           <ol>
-            <li>拖入文档到「文档」工作台（支持多文件），点「提取并翻译」</li>
+            <li>拖入文档到「文档」工作台（支持多文件，也支持整个文件夹递归导入），点「提取并翻译」</li>
             <li>PDF 提取方式可选：文字层（默认）或图片 OCR（文字层乱码/缺失时强制逐页识别）</li>
-            <li>导出可选：Word / Markdown / TXT / PDF。PDF 导出保持原排版——文字层原位替换译文；扫描件整页渲染成图后按图片方式覆盖译文</li>
-            <li>导出时先弹系统保存框选位置（单个文件）；多文件批量直接下载到「下载」文件夹</li>
+            <li>翻译完成后点「编辑」可逐条修改原文与译文，改完点「完成」</li>
+            <li>点「导出」选格式与方式：格式有 原格式 / TXT / Markdown / HTML / Word / PDF；方式有 逐个写入文件夹 / 打包 ZIP</li>
+            <li>原格式导出保留排版；跨格式导出（如 Word → Markdown）只保留文字，标题层级与表格结构会丢失</li>
+            <li>PDF 选「PDF」格式可保持原排版：文字层原位替换译文，扫描件整页渲染成图后覆盖译文</li>
           </ol>
           <h4>图片翻译</h4>
           <ol>
-            <li>在「图片」工作台拖入图片，自动 OCR 识别图中文字并翻译</li>
-            <li>切换 仅原文 / 对照 / 仅译文 查看框内文字变化</li>
-            <li>导出 TXT / Markdown / 译文标注图（当前视图合成 PNG）</li>
+            <li>在「图片」工作台拖入图片或整个文件夹（也可点「选择文件夹」），子目录一并扫描</li>
+            <li>列表里勾选要处理的图片，点「开始识别并翻译」——先选图再跑 OCR，不会误跑全量</li>
+            <li>结果按文本平铺，行首是所属图片的缩略图；顶部切换 仅原文 / 对照 / 仅译文</li>
+            <li>点缩略图放大查看该张图的译文覆盖效果，点图片以外的空白处返回列表</li>
+            <li>点「编辑」可逐条修改原文与译文，导出覆盖图会使用修改后的译文</li>
+            <li>导出支持「导出多图」（选文件夹逐张写入）和「导出 ZIP」；勾选「同时导出文本对照」可一并输出 Markdown</li>
           </ol>
           <h4>游戏 / 使用方法</h4>
           <ol>
             <li>把游戏文件夹拖进窗口，或点击选择（自动识别文件编码，日文游戏无需手动转码）</li>
             <li>扫描到 .xp3 资源包：点「解包并翻译」，包内文本会加入文件列表（标记【xp3】）</li>
             <li>勾选文本文件 → 「提取并翻译」</li>
-            <li>左侧文件树查看译文，顶部切换 仅原文 / 对照 / 仅译文</li>
+            <li>左侧文件树查看译文，顶部切换 仅原文 / 对照 / 仅译文；点「编辑」可逐条修改原文与译文</li>
             <li>「导出」下载 zip（保持原编码）；解包过的资源包可「封包为 xp3」（原包自行备份后替换）</li>
           </ol>
           <h4>翻译引擎</h4>
@@ -349,6 +416,7 @@
           </ul>
           <h4>常见问题</h4>
           <ul>
+            <li>导出文件去哪了？点导出会弹系统另存为窗口，位置由你选；多文件导出会先让你选一个文件夹</li>
             <li>Windows 提示“未知发布者”？点「更多信息 → 仍要运行」，程序没有病毒</li>
             <li>杀毒软件报警？属误报，添加信任即可</li>
             <li>译文中文显示为方块？原日文编码装不下中文时已自动转存 UTF-8，游戏可能需要中文字库</li>
@@ -363,6 +431,27 @@
           更新日志
         </summary>
         <div class="ut-help__body">
+          <h4>v1.4.1 (2026-11-02)</h4>
+          <ul>
+            <li>修复 Markdown / 文本文档提取不全：目标是中文时提取器按汉字数量把整行判为中文就跳过，240 行的笔记只提出 2 条；现在提取全部内容，是否跳过交给翻译阶段判断</li>
+            <li>修复游戏翻译目标语言写死：九处硬编码 zh-CN，切到英语或日语后中文剧本一行都提不出来</li>
+            <li>修复日文纯汉字词被误跳过：回復薬、勇者、薬草 这类词不再被当成「已是中文」而漏译</li>
+            <li>新增应用图标：重新绘制的「译」字图标，替换 PyInstaller 默认图标</li>
+          </ul>
+          <h4>v1.4.0 (2026-10-24)</h4>
+          <ul>
+            <li>图片批量翻译：文件夹拖入递归导入，先选图再 OCR，结果按文本平铺并带缩略图，点缩略图放大查看覆盖效果</li>
+            <li>文档工作台同样支持文件夹拖入，递归扫描子目录；同名文件用相对路径区分，不再相互覆盖</li>
+            <li>导出面板：格式（原格式 / TXT / Markdown / HTML / Word / PDF）× 方式（逐个写入文件夹 / 打包 ZIP）自由组合</li>
+            <li>跨格式文本转换：任意文档可导出为 TXT / Markdown / HTML / Word / PDF（只保留文字，排版不跨格式）</li>
+            <li>预览界面逐条编辑：原文与译文都能改，失焦即保存，导出自动使用新内容</li>
+            <li>修复：换目标语言后仍返回上一次译文（缓存 key 未包含目标语言）</li>
+            <li>修复：原文已是目标语言时被误判为「引擎拒绝翻译」，现在自动跳过不送翻</li>
+            <li>修复：导出文件丢失（WebView2 静默拦下下载），全部导出改为系统另存对话框</li>
+            <li>修复：状态行统计内容重复累加，多次运行后叠成一串</li>
+            <li>PDF 转 Word 字体统一为微软雅黑并转为纯黑，不再出现标题/正文/中西文多种字体混排</li>
+            <li>OCR 提速与稳健性：缩略图 4 路并发、识别 3 路并发；网络失败自动重试 3 次；超大图自动等比缩小</li>
+          </ul>
           <h4>v1.3.0 (2026-08-25)</h4>
           <ul>
             <li>新增图片翻译工作台：PNG / JPG / WebP / BMP 拖入即 OCR，三态标注视图（仅原文/对照/仅译文），导出 TXT / Markdown / 译文标注图</li>

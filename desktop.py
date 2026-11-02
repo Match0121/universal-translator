@@ -81,6 +81,21 @@ def get_web_root():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 
 
+def _ocr_log(msg):
+    """图片 OCR 请求日志（诊断用）：写到临时目录 ut_img_ocr.log。
+
+    前端报 Failed to fetch 时，翻这个日志就能分清：
+    请求根本没到（没有 recv 行） = 浏览器/网络层问题
+    有 recv 但没有 ok 行          = 服务端处理中挂了
+    """
+    try:
+        path = os.path.join(tempfile.gettempdir(), 'ut_img_ocr.log')
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+    except Exception:
+        pass
+
+
 def find_free_port():
     for port in CANDIDATE_PORTS:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -163,10 +178,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._handle_pdf_extract()
         elif self.path == '/api/pdf/export':
             self._handle_pdf_export()
+        elif self.path == '/api/doc/export':
+            self._handle_doc_export()
         elif self.path == '/api/pdf/ocr':
             self._handle_pdf_ocr()
         elif self.path == '/api/img/ocr':
             self._handle_img_ocr()
+        elif self.path == '/api/open-url':
+            self._handle_open_url()
         else:
             self.send_error(404, 'Not Found')
 
@@ -301,6 +320,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_img_ocr(self):
         # 接收图片字节 → OCR 识别文字框 → 返回坐标与文本
+        # 诊断日志：前端报 Failed to fetch 时，看这里就能判断请求到底有没有到
+        t0 = time.time()
+        _ocr_log('recv file=%s len=%s ua_ok' % (
+            self.headers.get('X-Filename'), self.headers.get('Content-Length')))
         try:
             length = int(self.headers.get('Content-Length', 0))
             if length <= 0:
@@ -308,9 +331,41 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             data = self.rfile.read(length)
             filename = self.headers.get('X-Filename') or 'image.png'
             result = ocr_image(data, filename)
+            _ocr_log('ok len=%s bytes=%s boxes=%s %.1fs' % (
+                length, len(data), len(result['boxes']), time.time() - t0))
             self._json({'ok': True, 'count': len(result['boxes']), **result})
         except ImgError as e:
+            _ocr_log('ImgError %s' % e)
             self._json({'ok': False, 'error': str(e)}, 502)
+        except Exception as e:
+            _ocr_log('Exception %s: %s' % (type(e).__name__, e))
+            self._json({'ok': False, 'error': str(e)}, 502)
+
+    def _handle_doc_export(self):
+        # 通用文档导出：任意来源的文本单元 → 生成目标格式（docx / pdf / md / txt）
+        # 与 /api/pdf/export 的区别：不需要 PDF 会话，纯文本进出。
+        # src_bytes 不传时，PDF 走重排（不保原排版）、docx 走 python-docx 段落生成。
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
+            fmt = body.get('fmt') or 'docx'
+            units = body.get('units') or []
+            if not units:
+                raise RuntimeError('没有可导出的内容')
+            if fmt not in ('docx', 'pdf', 'md', 'txt'):
+                raise RuntimeError('不支持的目标格式: ' + str(fmt))
+            original_paras = [{'seq': i, 'original': u.get('original', '')}
+                              for i, u in enumerate(units)]
+            translated = [{'idx': i, 'translated': u.get('translated', '')}
+                          for i, u in enumerate(units)]
+            blob, fname, mime = export_translated(original_paras, translated, fmt)
+            self.send_response(200)
+            self.send_header('Content-Type', mime)
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Content-Disposition', 'attachment; filename="' + fname + '"')
+            self.send_header('Content-Length', str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
         except Exception as e:
             self._json({'ok': False, 'error': str(e)}, 502)
 
@@ -389,6 +444,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._json({'ok': False, 'error': str(e)}, 502)
 
+    def _handle_open_url(self):
+        # 用系统浏览器打开外部链接。WebView2 内直接点 a[href] 会把应用页面顶掉或被静默拦截，
+        # 所以统一走后端。只放行赞助页面，避免变成任意跳转。
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
+            url = (body.get('url') or '').strip()
+            allowed = ('https://afdian.com/', 'https://afdian.net/')
+            if not url.startswith(allowed):
+                self._json({'ok': False, 'error': '不允许的地址'}, 400)
+                return
+            webbrowser.open(url)
+            self._json({'ok': True})
+        except Exception as e:
+            self._json({'ok': False, 'error': str(e)}, 502)
+
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -403,6 +474,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
+    _ocr_log('=== 应用启动 pid=%s ===' % os.getpid())
     port = find_free_port()
     handler = functools.partial(Handler, directory=get_web_root())
     httpd = socketserver.ThreadingTCPServer(('127.0.0.1', port), handler)

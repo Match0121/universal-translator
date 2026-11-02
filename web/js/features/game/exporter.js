@@ -79,7 +79,7 @@ export function rebuild(text, units, mode = 'translated') {
 }
 
 /** 导出为 zip（按原目录结构）。返回 { warnings }：编码降级等提示 */
-export async function exportZip(files, units, mode, zipName) {
+export async function exportZip(files, units, mode, zipName, saveFn) {
   const JSZip = window.JSZip;
   if (!JSZip) throw new Error('JSZip 未加载，请检查网络后刷新页面');
   const zip = new JSZip();
@@ -111,13 +111,14 @@ export async function exportZip(files, units, mode, zipName) {
     done++;
   }
   const blob = await zip.generateAsync({ type: 'blob' });
-  downloadBlob(blob, zipName || 'translated.zip');
+  if (saveFn) await saveFn(blob, zipName || 'translated.zip');
+  else downloadBlob(blob, zipName || 'translated.zip');
   return { warnings };
 }
 
 /** 封包：把资源包内已翻译文件写回并重新打包为 xp3（本地服务端合并 + 封包）
  *  返回 { warnings } 编码降级提示 */
-export async function exportXp3(files, units, mode, name) {
+export async function exportXp3(files, units, mode, name, saveFn) {
   const byFile = groupBy(units, 'file');
   const targets = files.filter(f => f.xp3Rel && byFile.has(f.path) && !f.skipped);
   if (!targets.length) throw new Error('没有已翻译的资源包文件');
@@ -151,6 +152,7 @@ export async function exportXp3(files, units, mode, name) {
     throw new Error((err && err.error) || '封包失败（HTTP ' + resp.status + '）');
   }
   const blob = await resp.blob();
-  downloadBlob(blob, name || 'translated.xp3');
+  if (saveFn) await saveFn(blob, name || 'translated.xp3');
+  else downloadBlob(blob, name || 'translated.xp3');
   return { warnings };
 }

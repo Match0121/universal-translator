@@ -1,0 +1,5 @@
+# GitHub 仓库页 Sponsor 按钮的配置
+#
+# 爱发电不在 GitHub 官方支持平台列表里，用 custom 放自定义链接。
+# 推送后，仓库右上角（Star 按钮旁）会出现 Sponsor 入口。
+custom: ["https://afdian.com/a/match0121"]

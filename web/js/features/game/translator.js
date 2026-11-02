@@ -307,20 +307,66 @@ export async function clearCache() {
 
 const BAD_RESULT = /PLEASE SELECT|QUERY LIMIT|MYMEMORY WARNING|INVALID REQUEST|TOO MANY/i;
 
+/* ---------------- 语言判断：原文是否已是目标语言 ---------------- */
+
+/** 粗判文本主要语言：zh / ja / ko / en / ''（空表示没有可用文字） */
+export function guessLang(text) {
+  const t = String(text || '');
+  if (!t) return '';
+  const han = (t.match(/[\u4e00-\u9fff]/g) || []).length;
+  const kana = (t.match(/[\u3040-\u30ff]/g) || []).length;
+  const hangul = (t.match(/[\uac00-\ud7af]/g) || []).length;
+  const latin = (t.match(/[a-zA-Z]/g) || []).length;
+  const total = han + kana + hangul + latin;
+  if (!total) return '';
+  if (kana > 0) return 'ja';
+  if (hangul > 0) return 'ko';
+  if (han / total > 0.3) return 'zh';
+  if (latin / total > 0.5) return 'en';
+  return '';
+}
+
+/**
+ * 判断文本是否已经是目标语言。
+ * 繁体目标（zh-TW）不并进来，繁简转换仍要交给引擎处理。
+ */
+export function isTargetLang(text, targetLang) {
+  const g = guessLang(text);
+  if (!g) return false;
+  const tl = String(targetLang || '').toLowerCase();
+  if (g === 'zh') {
+    if (!(tl.startsWith('zh') && !tl.includes('tw') && !tl.includes('hant'))) return false;
+    // 目标是中文时还要区分「真中文」与「日文纯汉字词」：
+    // 回復薬 / 勇者 / 薬草 这类词要翻成中文，不能当作已是目标语言跳过
+    const t = String(text || '');
+    if (/[\u3040-\u30ff\uff61-\uff9f]/.test(t)) return false;          // 有假名 → 日文
+    if (/[，。！？；：「」“”、《》【】]/.test(t)) return true;                 // 中文标点
+    if (/[的吧了是在这那吗呢和被与就都还很从到对]/.test(t)) return true;      // 中文虚词
+    return (t.match(/[\u4e00-\u9fff]/g) || []).length >= 4;              // 4+ 汉字无假名
+  }
+  if (g === 'ja') return tl === 'ja' || tl.startsWith('ja-');
+  if (g === 'ko') return tl === 'ko' || tl.startsWith('ko-');
+  if (g === 'en') return tl === 'en' || tl.startsWith('en-');
+  return false;
+}
+
 /** 校验译文是否有效；返回 { ok, error } */
-export function validateTranslation(original, result) {
+export function validateTranslation(original, result, targetLang) {
   if (!result || !String(result).trim()) return { ok: false, error: '翻译结果为空' };
   if (BAD_RESULT.test(result)) return { ok: false, error: '引擎返回错误提示（' + String(result).slice(0, 50) + '），建议切换翻译引擎' };
   const o = String(original).trim().toLowerCase();
   const r = String(result).trim().toLowerCase();
-  // 原文与译文完全相同且含文字（排除纯符号/数字/URL），视为引擎拒绝翻译
+  // 原文与译文完全相同且含文字（排除纯符号/数字/URL），通常是引擎拒译
   if (o.length >= 3 && o === r && /[a-z\u4e00-\u9fff]/.test(o)) {
+    // 但原文本身就是目标语言时，返回原文是正确结果，不该算失败
+    if (isTargetLang(original, targetLang)) return { ok: true, error: '' };
     return { ok: false, error: '引擎返回原文（未翻译），建议切换翻译引擎（如百度翻译）' };
   }
   return { ok: true, error: '' };
 }
 
 /* ---------------- 并发队列 ---------------- */
+
 
 export async function runPool(items, n, worker, stopRef) {
   let idx = 0;
@@ -349,13 +395,26 @@ export async function translateUnits(units, settings, onProgress, stopRef) {
   if (!provider) throw new Error('未知翻译引擎: ' + settings.provider);
   if (settings.provider === 'openai' && !settings.model) throw new Error('请先在设置中填写模型名称');
 
-  const todo = units.filter(u => !u.translated);
-  todo.forEach(u => { u.error = ''; });
-  const dedupe = new Map();   // 原文 → 译文（同句只翻一次）
+  // 原文已是目标语言的直接沿用：不请求引擎，也避免被校验判成“拒译”
   let done = 0;
-  const total = todo.length;
   const failed = [];
-  const cacheKey = orig => hashStr(settings.provider + '|' + orig);
+  const todo = [];
+  for (const u of units) {
+    if (u.translated) continue;
+    u.error = '';
+    if (isTargetLang(u.original, settings.targetLang)) {
+      u.translated = u.original;
+      u.unchanged = true;     // 标记：原文即目标语言，未真正翻译
+      done++;
+      continue;
+    }
+    todo.push(u);
+  }
+  const dedupe = new Map();   // 原文 → 译文（同句只翻一次）
+  const total = todo.length + done;
+  if (done && onProgress) onProgress(done, total, 0);
+  // 缓存 key 必须包含目标语言，否则同一原文先译成英文后，换语言仍会命中英文缓存
+  const cacheKey = orig => hashStr(settings.provider + '|' + (settings.targetLang || '') + '|' + orig);
 
   const worker = async (u) => {
     if (stopRef && stopRef.stopped) return;
@@ -376,7 +435,7 @@ export async function translateUnits(units, settings, onProgress, stopRef) {
               await sleep(isLimit ? 4000 * attempts : 600 * attempts);
             }
           }
-          const v = validateTranslation(u.original, t);
+          const v = validateTranslation(u.original, t, settings.targetLang);
           if (v.ok) {
             if (t) await cacheSet(cacheKey(u.original), t);
             dedupe.set(u.original, t);

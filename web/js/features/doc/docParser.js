@@ -29,22 +29,15 @@ export function detectDocType(fileName) {
   return null;
 }
 
-function isTranslateableDoc(s, targetLang) {
+function isTranslateableDoc(s) {
   if (!s) return false;
   const t = s.trim();
   if (!t || t.length > 800) return false;
-  if (/^[\d\s.,%+\-*\/=<>:;|!?()[\]{}"\'`~^#$@&]+$/.test(t)) return false;
-  // 目标语言是中文时，已是中文的行跳过（避免中→中空转）；目标语言非中文时中文照常送译
-  const lang = (targetLang || store.state.settings.targetLang || 'zh-CN');
-  const han = (t.match(/[\u4e00-\u9fff]/g) || []).length;
-  if (han > 0 && !/[\u3040-\u30ff\uff61-\uff9f]/.test(t)) {
-    if (!lang.startsWith('zh')) return true;
-    if (/[，。！？；：「」“”、《》【】]/.test(t)) return false;
-    if (/[的吧了是在这那吗呢和被与就都还很从到对]/.test(t)) return false;
-    if (han >= 4) return false;
-  }
+  // 纯数字 / 符号 / 标点行没有可译内容
+  if (/^[\d\s.,%+\-*\/=<>:;|!?()[\]{}"'`~^#$@&]+$/.test(t)) return false;
   return true;
 }
+
 
 function unitText(u, mode) {
   if (mode === 'original') return u.original;

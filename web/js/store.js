@@ -3,6 +3,7 @@
 const state = {
   theme: 'light',           // 默认浅色；用户切换后存 localStorage 保留偏好
   view: 'bilingual',          // original | bilingual | translated
+  editing: false,             // 浏览阶段是否处于逐条编辑态
   filter: 'all',              // all | untranslated | translated
   search: '',
   game: null,                 // exe 解析结果

@@ -29,7 +29,9 @@ export function isChineseText(t) {
 }
 
 /** 判断一行文本是否需要翻译（目标是中文时，已是中文的行跳过） */
-export function isTranslateable(s, targetLang = 'zh-CN', skipPureHan = false) {
+let _targetLang = 'zh-CN';   // 由 extractFile 设置，避免每层函数都传参
+
+export function isTranslateable(s, targetLang = _targetLang, skipPureHan = false) {
   if (!s) return false;
   const t = s.trim();
   if (!t || t.length > 800) return false;
@@ -63,7 +65,7 @@ function makeUnits(lines, file, skipPureHan, matcher) {
     for (const m of ms) {
       const original = m.original;
       if (!original) continue;
-      if (!isTranslateable(original, 'zh-CN', skipPureHan)) continue;
+      if (!isTranslateable(original, _targetLang, skipPureHan)) continue;
       const raw = m.raw || original;
       const occ = lineSeen.get(raw) || 0;
       lineSeen.set(raw, occ + 1);
@@ -103,7 +105,7 @@ const EXTRACTORS = [
     extract(lines, file, skipPureHan) {
       return makeUnits(lines, file, skipPureHan, (line) => {
         const t = line.trim();
-        if (!isTranslateable(t, 'zh-CN', skipPureHan)) return null;
+        if (!isTranslateable(t, _targetLang, skipPureHan)) return null;
         return [{ original: t }];
       });
     },
@@ -119,7 +121,7 @@ const EXTRACTORS = [
         let m;
         while ((m = re.exec(line))) {
           const decoded = decodeEsc(m[1]);
-          if (!isTranslateable(decoded, 'zh-CN', skipPureHan)) continue;
+          if (!isTranslateable(decoded, _targetLang, skipPureHan)) continue;
           out.push({ original: decoded, raw: m[0], ex: 'json' });
         }
         return out.length ? out : null;
@@ -136,7 +138,7 @@ const EXTRACTORS = [
         const eq = line.indexOf('=');
         const key = line.slice(0, eq).trim();
         const val = line.slice(eq + 1).trim();
-        if (!key || !isTranslateable(val, 'zh-CN', skipPureHan)) return null;
+        if (!key || !isTranslateable(val, _targetLang, skipPureHan)) return null;
         return [{ original: val, raw: line, ex: 'ini' }];
       });
     },
@@ -149,7 +151,7 @@ const EXTRACTORS = [
       return makeUnits(lines, file, skipPureHan, (line) => {
         const t = line.trim();
         if (!t || /^\d+$/.test(t) || /-->/.test(t)) return null;
-        if (!isTranslateable(t, 'zh-CN', skipPureHan)) return null;
+        if (!isTranslateable(t, _targetLang, skipPureHan)) return null;
         return [{ original: t }];
       });
     },
@@ -166,7 +168,7 @@ const EXTRACTORS = [
         const textField = parts.slice(9).join(',');
         const tags = [];
         const plain = textField.replace(/\{[^}]*\}/g, (tag) => { tags.push(tag); return ''; }).trim();
-        if (!plain || !isTranslateable(plain, 'zh-CN', skipPureHan)) return null;
+        if (!plain || !isTranslateable(plain, _targetLang, skipPureHan)) return null;
         // raw 取 plain 在行内的最小形态；写回时标签拼回译文前
         return [{ original: plain, raw: plain, ex: 'ass', meta: { tags } }];
       });
@@ -188,7 +190,7 @@ const EXTRACTORS = [
           const p = quotedParts(m);
           const inner = decodeEsc(p.inner);
           const tr = inner.trim();
-          if (!isTranslateable(tr, 'zh-CN', skipPureHan)) continue;
+          if (!isTranslateable(tr, _targetLang, skipPureHan)) continue;
           if (/^\{.*\}$/.test(tr) || /^[a-zA-Z_][a-zA-Z0-9_.]*$/.test(tr)) continue; // 插值/标识符
           out.push({ original: tr, raw: m[0], ex: 'rpy', meta: { q: p.quote } });
         }
@@ -210,7 +212,7 @@ const EXTRACTORS = [
         while ((m = re.exec(line))) {
           const p = quotedParts(m);
           const inner = decodeEsc(p.inner);
-          if (!isTranslateable(inner, 'zh-CN', skipPureHan)) continue;
+          if (!isTranslateable(inner, _targetLang, skipPureHan)) continue;
           out.push({ original: inner, raw: m[0], ex: 'ks', meta: { q: p.quote } });
         }
         return out.length ? out : null;
@@ -226,7 +228,7 @@ const EXTRACTORS = [
         const m = /^(\s*[^#][^:]*?:\s*)(["'])(.*?)\2\s*$/.exec(line);
         if (!m) return null;
         const orig = decodeEsc(m[3]);
-        if (!isTranslateable(orig, 'zh-CN', skipPureHan)) return null;
+        if (!isTranslateable(orig, _targetLang, skipPureHan)) return null;
         return [{ original: orig, raw: line, ex: 'yaml' }];
       });
     },
@@ -239,7 +241,8 @@ const EXTRACTORS = [
   },
 ];
 
-export function extractFile(text, fileName, encoding) {
+export function extractFile(text, fileName, encoding, targetLang) {
+  if (targetLang) _targetLang = targetLang;
   const ext = extOf(fileName);
   const ex = EXTRACTORS.find(e => e.exts.includes(ext));
   if (!ex) return [];
