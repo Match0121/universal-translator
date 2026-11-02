@@ -1,5 +1,7 @@
 # 万能翻译站 · Universal Translator
 
+[![爱发电](https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-%E8%AF%B7%E6%88%91%E5%96%9D%E6%9D%AF%E5%A5%B6%E8%8C%B6-946ce6?style=flat-square)](https://afdian.com/a/match0121)
+
 > Windows 桌面端全能翻译工具：文件、文档、游戏、图片，拖入即译。
 > Drag in files, documents, games or images — detect, extract, translate, done.
 
