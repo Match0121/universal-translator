@@ -63,6 +63,12 @@ python desktop.py
 
 打包：双击 `build.bat`，产物在 `dist\UniversalTranslator.exe`。
 
+## 支持
+
+软件完全免费、完全本地，没有广告、不用注册、也不收集任何数据。
+
+如果你觉得它有用，可以点点star或者 [请我喝杯奶茶](https://afdian.com/a/match0121)。赞助不解锁任何功能，软件该有的能力都在这里了，不会因为没赞助就少什么。
+
 ## 更新日志
 
 ### v1.4.2 (2026-11-13)
@@ -114,15 +120,6 @@ python desktop.py
 - 文件编码自动检测，日文游戏免转码
 - 吉里吉里 xp3 资源包解包 + 封包
 - 导出保持原编码写回
-- 版本号采用 x.x.x 三位格式
-
-## 支持
-
-软件完全免费、完全本地，没有广告、不用注册、也不收集任何数据。
-
-如果你觉得它有用，可以 [请我喝杯奶茶](https://afdian.com/a/match0121)。赞助不解锁任何功能，软件该有的能力都在这里了，不会因为没赞助就少什么。
-
-<a href="https://afdian.com/a/match0121"><img src="https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-%E8%AF%B7%E6%88%91%E5%96%9D%E6%9D%AF%E5%A5%B6%E8%8C%B6-946ce6?style=flat-square" alt="爱发电"></a>
 
 ## License
 
