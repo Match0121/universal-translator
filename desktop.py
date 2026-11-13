@@ -23,7 +23,7 @@ import uuid
 import webbrowser
 
 from unpack.xp3 import Xp3Error, pack_bytes, unpack_bytes
-from pdf import PdfError, extract_pdf, export_translated, start_ocr, ocr_status
+from pdf import PdfError, extract_pdf, export_translated, export_html_pdf, start_ocr, ocr_status
 from img import ImgError, ocr_image
 
 APP_NAME = 'Universal Translator'
@@ -342,23 +342,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json({'ok': False, 'error': str(e)}, 502)
 
     def _handle_doc_export(self):
-        # 通用文档导出：任意来源的文本单元 → 生成目标格式（docx / pdf / md / txt）
-        # 与 /api/pdf/export 的区别：不需要 PDF 会话，纯文本进出。
-        # src_bytes 不传时，PDF 走重排（不保原排版）、docx 走 python-docx 段落生成。
+        # 通用文档导出：任意来源 → 目标格式（docx / pdf / md / txt）
+        # 两种入参：
+        #   1) html：前端已把 Markdown / Word 结构转成 HTML，后端用 Story 渲染，
+        #      标题层级、列表、表格、代码块都能保留
+        #   2) units：纯文本单元数组，PDF 走重排、docx 走 python-docx 段落生成
         try:
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
             fmt = body.get('fmt') or 'docx'
-            units = body.get('units') or []
-            if not units:
-                raise RuntimeError('没有可导出的内容')
-            if fmt not in ('docx', 'pdf', 'md', 'txt'):
-                raise RuntimeError('不支持的目标格式: ' + str(fmt))
-            original_paras = [{'seq': i, 'original': u.get('original', '')}
+            html = body.get('html') or ''
+            if html:
+                if fmt != 'pdf':
+                    raise RuntimeError('HTML 渲染只支持导出 PDF')
+                blob, fname, mime = export_html_pdf(html, bool(body.get('pageNumbers')))
+            else:
+                units = body.get('units') or []
+                if not units:
+                    raise RuntimeError('没有可导出的内容')
+                if fmt not in ('docx', 'pdf', 'md', 'txt'):
+                    raise RuntimeError('不支持的目标格式: ' + str(fmt))
+                original_paras = [{'seq': i, 'original': u.get('original', '')}
+                                  for i, u in enumerate(units)]
+                translated = [{'idx': i, 'translated': u.get('translated', '')}
                               for i, u in enumerate(units)]
-            translated = [{'idx': i, 'translated': u.get('translated', '')}
-                          for i, u in enumerate(units)]
-            blob, fname, mime = export_translated(original_paras, translated, fmt)
+                blob, fname, mime = export_translated(original_paras, translated, fmt)
             self.send_response(200)
             self.send_header('Content-Type', mime)
             self.send_header('Cache-Control', 'no-cache')

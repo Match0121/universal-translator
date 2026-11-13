@@ -710,7 +710,7 @@ def export_translated(original_paras, translated_paras, fmt, src_bytes=None):
         lines = []
         for item in ordered:
             lines.append(('## ' if item['title'] else '') + item['text'])
-        text = '# 译文文档\n\n' + '\n\n'.join(lines) + '\n'
+        text = '\n\n'.join(lines) + '\n'
         return text.encode('utf-8'), 'translated.md', 'text/markdown'
 
     if fmt == 'txt':
@@ -720,7 +720,6 @@ def export_translated(original_paras, translated_paras, fmt, src_bytes=None):
     if fmt == 'docx':
         wd = Document()
         _unify_docx_style(wd)
-        wd.add_heading('译文文档', 0)
         for item in ordered:
             if item['title']:
                 wd.add_heading(item['text'], level=1)
@@ -755,13 +754,8 @@ def _export_pdf_reflow(ordered):
     x0 = 60
     max_x = 535                          # A4 595 - 右边距 60
     max_y = 792                          # A4 842 - 底边距 50
-    pg = out.new_page()                  # 首页：标题 + 版式说明
-    y = 50
-    pg.insert_text((x0, y), '译文文档', fontsize=16, fontname=MAIN_FONT_NAME, fontfile=MAIN_FONT_FILE)
-    y += 20
-    pg.insert_text((x0, y), '此译文由 Universal Translator 重新排版生成，版式与原文可能存在差异',
-                   fontsize=8, fontname=MAIN_FONT_NAME, fontfile=MAIN_FONT_FILE, color=(0.45, 0.45, 0.45))
-    y += 26
+    pg = out.new_page()
+    y = 56
     for item in ordered:
         text = item['text']
         title = item['title']
@@ -793,3 +787,109 @@ def _export_pdf_reflow(ordered):
     out.save(buf)
     out.close()
     return buf.getvalue(), 'translated.pdf', 'application/pdf'
+
+
+# ---------------- HTML → PDF（Story 渲染，保留 Markdown/Word 结构） ----------------
+
+# 黑白极简排版：无主题色、无装饰，只用字号、字重、留白和细边框区分层级
+_HTML_CSS_TEMPLATE = """
+@font-face { font-family: ut; src: url(%(font)s); }
+body { font-family: ut; font-size: 11pt; line-height: 1.75; color: #000; margin: 0; }
+h1 { font-size: 20pt; font-weight: bold; line-height: 1.35; margin: 0 0 14pt 0; }
+h2 { font-size: 15pt; font-weight: bold; line-height: 1.4; margin: 18pt 0 9pt 0; }
+h3 { font-size: 12.5pt; font-weight: bold; line-height: 1.45; margin: 14pt 0 7pt 0; }
+h4 { font-size: 11.5pt; font-weight: bold; margin: 12pt 0 6pt 0; }
+h5, h6 { font-size: 11pt; font-weight: bold; margin: 10pt 0 5pt 0; }
+p { margin: 0 0 9pt 0; }
+ul, ol { margin: 0 0 10pt 0; padding-left: 20pt; }
+li { margin: 0 0 4pt 0; }
+li p { margin: 0 0 4pt 0; }
+table { border-collapse: collapse; width: 100%%; margin: 8pt 0 12pt 0; }
+th, td { border: 0.75pt solid #9a9a9a; padding: 5pt 7pt; font-size: 10pt; text-align: left; vertical-align: top; }
+th { font-weight: bold; border-bottom: 1.2pt solid #000; }
+td p, th p { margin: 0; }
+blockquote { margin: 10pt 0; padding-left: 11pt; border-left: 2pt solid #c8c8c8; }
+blockquote p { margin: 0 0 5pt 0; }
+pre { padding: 6pt 0 6pt 11pt; margin: 8pt 0 12pt 0; border-left: 2pt solid #9a9a9a; }
+pre code { font-family: ut; font-size: 9.5pt; line-height: 1.55; }
+code { font-family: ut; font-size: 10pt; }
+hr { border: none; border-top: 0.75pt solid #9a9a9a; margin: 14pt 0; }
+strong { font-weight: bold; }
+em { font-style: italic; }
+img { max-width: 100%%; }
+a { color: #000; text-decoration: underline; }
+"""
+
+
+def _html_font_path():
+    """Story 渲染必须拿到真实字体文件，否则中文字形会整体丢失。"""
+    for p in (r'C:\Windows\Fonts\msyh.ttc', r'C:\Windows\Fonts\msyhl.ttc',
+              r'C:\Windows\Fonts\simsun.ttc', r'C:\Windows\Fonts\simhei.ttf'):
+        if os.path.isfile(p):
+            return p.replace('\\', '/')
+    return None
+
+
+def _stamp_page_numbers(doc):
+    """页脚居中写「当前页 / 总页数」，灰色小字。"""
+    total = doc.page_count
+    fs = 9
+    for i, page in enumerate(doc):
+        label = '%d / %d' % (i + 1, total)
+        try:
+            w = _MEASURE_FONT.text_length(label, fontsize=fs)
+            r = page.rect
+            page.insert_text(((r.width - w) / 2, r.height - 28), label,
+                             fontsize=fs, fontname=MAIN_FONT_NAME, fontfile=MAIN_FONT_FILE,
+                             color=(0.4, 0.4, 0.4))
+        except Exception:
+            pass
+
+
+def export_html_pdf(html, page_numbers=False):
+    """把 HTML 渲染成 PDF，保留标题层级、列表、表格、代码块等结构。
+
+    html   : body 内的 HTML 片段（由前端 marked / docx 解析器生成）
+    page_numbers: 是否在页脚加页码
+    返回 (bytes, filename, mime)
+    """
+    font = _html_font_path()
+    if not font:
+        raise PdfError('系统缺少可用中文字体，无法渲染 PDF')
+    css = _HTML_CSS_TEMPLATE % {'font': font}
+    try:
+        story = pymupdf.Story(html=html, user_css=css)
+    except Exception as e:
+        raise PdfError('HTML 解析失败: %s' % e)
+
+    buf = io.BytesIO()
+    writer = pymupdf.DocumentWriter(buf)
+    mediabox = pymupdf.paper_rect('a4')
+    # 底边留 56pt，页码画在 28pt 处不会压到正文
+    where = mediabox + (56, 56, -56, -56)
+    pages = 0
+    try:
+        while True:
+            device = writer.begin_page(mediabox)
+            more, _ = story.place(where)
+            story.draw(device)
+            writer.end_page()
+            pages += 1
+            if not more:
+                break
+            if pages > 500:      # 防御：异常 HTML 不该无限翻页
+                break
+    except Exception as e:
+        writer.close()
+        raise PdfError('PDF 渲染失败: %s' % e)
+    writer.close()
+
+    data = buf.getvalue()
+    doc = pymupdf.open('pdf', data)
+    if page_numbers:
+        _stamp_page_numbers(doc)
+    doc.subset_fonts()          # 字体子集化：18MB -> 几十 KB
+    out = io.BytesIO()
+    doc.save(out, garbage=3, deflate=True, clean=True)
+    doc.close()
+    return out.getvalue(), 'translated.pdf', 'application/pdf'

@@ -9,7 +9,8 @@ import { readText } from './features/game/encoding.js';
 import { translateUnits, clearCache } from './features/game/translator.js';
 import { renderFileList, renderFileTree, renderFileContent, showProgress, hideProgress } from './features/game/bilingView.js';
 import { exportZip, exportXp3 } from './features/game/exporter.js';
-import { detectDocType, extractDoc, rebuildDoc, docText, exportPdfDoc, DOC_EXT } from './features/doc/docParser.js';
+import { detectDocType, extractDoc, rebuildDoc, docText, exportPdfDoc, docxToHtml, DOC_EXT } from './features/doc/docParser.js';
+import { mdToHtml, textToHtml, unitsToHtml } from './features/doc/mdRender.js';
 import { initImgWorkbench } from './features/img/imgWorkbench.js';
 import { collectFromDataTransfer, fromFileList, makeFileInput } from './features/shared/fsDrop.js';
 import { editBlockHtml, bindEditables, snapshotBases } from './features/shared/editView.js';
@@ -814,29 +815,97 @@ function docOutName(f, forceExt) {
   return flat + '_译文' + ext;
 }
 
-/** 单文件跨格式转换：文本类前端拼，docx / pdf 交后端生成 */
-async function docConvert(us, fmt) {
+/** 预览/导出用的单单元文本 */
+function pickView(u, view) {
+  if (view === 'original') return u.original;
+  if (view === 'translated') return u.translated || u.original;
+  return u.original + ' / ' + (u.translated || '');
+}
+
+/** HTML 导出外壳：与 PDF 同一套黑白排版，只是换成系统字体 */
+function htmlShell(body) {
+  return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+    + '<title>译文</title>\n<style>\n'
+    + 'body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;font-size:15px;'
+    + 'line-height:1.75;color:#000;max-width:820px;margin:48px auto;padding:0 24px}\n'
+    + 'h1{font-size:26px;line-height:1.35;margin:0 0 18px}\n'
+    + 'h2{font-size:20px;line-height:1.4;margin:26px 0 12px}\n'
+    + 'h3{font-size:17px;margin:20px 0 10px}\n'
+    + 'h4,h5,h6{font-size:15px;margin:16px 0 8px}\n'
+    + 'p{margin:0 0 12px}\n'
+    + 'ul,ol{margin:0 0 14px;padding-left:24px}\nli{margin:0 0 5px}\n'
+    + 'table{border-collapse:collapse;width:100%;margin:10px 0 16px}\n'
+    + 'th,td{border:1px solid #9a9a9a;padding:6px 9px;font-size:14px;text-align:left;vertical-align:top}\n'
+    + 'th{font-weight:700;border-bottom:2px solid #000}\n'
+    + 'blockquote{margin:14px 0;padding-left:14px;border-left:3px solid #c8c8c8}\n'
+    + 'pre{padding:6px 0 6px 14px;margin:10px 0 16px;border-left:3px solid #9a9a9a;overflow:auto}\n'
+    + 'code{font-family:Consolas,"Courier New",monospace;font-size:13.5px}\n'
+    + 'hr{border:none;border-top:1px solid #9a9a9a;margin:20px 0}\n'
+    + 'a{color:#000}\nimg{max-width:100%}\n'
+    + '</style>\n</head>\n<body>\n' + body + '\n</body>\n</html>';
+}
+
+/**
+ * 把单个文件的内容转成 HTML 片段，尽量保留原始结构。
+ * md → 用源文件重建后交由 marked；docx → 段落样式/表格还原；
+ * 其余格式没有可复用的块结构，按段落兜底。
+ */
+async function docToHtml(f, us) {
   const sorted = us.slice().sort((a, b) => a.seq - b.seq);
-  if (fmt === 'txt' || fmt === 'md') {
-    const text = docText(sorted, docState.view);
-    return new Blob([text], {
-      type: fmt === 'md' ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8',
-    });
+  const view = docState.view;
+  const type = detectDocType(f.name);
+  if (type === 'plain') {
+    if (/\.(md|markdown)$/i.test(f.name)) {
+      const r = await rebuildDoc(f.file, f.relPath, sorted, view);
+      return mdToHtml(r.text || '');
+    }
+    return textToHtml(docText(sorted, view));
   }
+  if (type === 'docx') {
+    return await docxToHtml(f.file, sorted, view);
+  }
+  return unitsToHtml(sorted, u => pickView(u, view));
+}
+
+/** 单文件跨格式转换：文本类前端拼，docx / pdf 交后端生成 */
+async function docConvert(f, us, fmt) {
+  const sorted = us.slice().sort((a, b) => a.seq - b.seq);
+  const type = detectDocType(f.name);
+  const isMd = /\.(md|markdown)$/i.test(f.name);
+
+  if (fmt === 'txt') {
+    return new Blob([docText(sorted, docState.view)], { type: 'text/plain;charset=utf-8' });
+  }
+
+  if (fmt === 'md') {
+    // md 源：用原文重建，标题井号、列表符号、表格竖线原样带回
+    if (type === 'plain' && isMd) {
+      const r = await rebuildDoc(f.file, f.relPath, sorted, docState.view);
+      return new Blob([r.text || ''], { type: 'text/markdown;charset=utf-8' });
+    }
+    return new Blob([docText(sorted, docState.view)], { type: 'text/markdown;charset=utf-8' });
+  }
+
   if (fmt === 'html') {
-    const body = sorted.map(u => {
-      const t = docState.view === 'original' ? u.original
-        : docState.view === 'translated' ? (u.translated || u.original)
-          : u.original + ' / ' + (u.translated || '');
-      return '<p>' + escapeHtml(t).replace(/\n/g, '<br>') + '</p>';
-    }).join('\n');
-    const html = '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
-      + '<title>译文</title>\n<style>body{font-family:"Microsoft YaHei",sans-serif;'
-      + 'line-height:1.75;max-width:820px;margin:40px auto;padding:0 20px;color:#222}</style>\n'
-      + '</head>\n<body>\n' + body + '\n</body>\n</html>';
-    return new Blob([html], { type: 'text/html;charset=utf-8' });
+    return new Blob([htmlShell(await docToHtml(f, sorted))], { type: 'text/html;charset=utf-8' });
   }
-  // docx / pdf：后端用 python-docx / pymupdf 生成
+
+  if (fmt === 'pdf' && type !== 'pdf') {
+    // md / txt / docx 走 HTML 渲染，结构完整保留
+    const body = await docToHtml(f, sorted);
+    const res = await fetch('/api/doc/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fmt: 'pdf', html: body, pageNumbers: !!docState.exportPageNum }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error((d && d.error) || ('导出失败 HTTP ' + res.status));
+    }
+    return await res.blob();
+  }
+
+  // docx / pdf（其它来源）：后端用 python-docx / pymupdf 生成
   const res = await fetch('/api/doc/export', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -887,7 +956,7 @@ async function docBuildOutputs(fmt, onProgress) {
         blob = r.blob;
         name = docOutName(f, '.pdf');
       } else {
-        blob = await docConvert(us, fmt);
+        blob = await docConvert(f, us, fmt);
         name = docOutName(f, '.' + fmt);
       }
     } catch (e) {
@@ -909,14 +978,25 @@ async function docBuildOutputs(fmt, onProgress) {
 
 docState.exportFmt = 'keep';
 docState.exportMode = 'files';
+docState.exportPageNum = false;
+
+/** 页码选项只在导出 PDF 时有意义 */
+function docSyncPageNumGroup() {
+  const g = $('#docPageNumGroup');
+  if (!g) return;
+  g.hidden = docState.exportFmt !== 'pdf';
+}
 
 function docSyncExportHint() {
   const hint = $('#docExportHint');
   if (!hint) return;
   const fmt = docState.exportFmt;
   if (fmt === 'keep') hint.textContent = '每个文件按原有格式与排版导出（PDF 源生成 Word）';
-  else if (fmt === 'pdf') hint.textContent = 'PDF 源文件保持原排版；其他文件按文本重排';
-  else hint.textContent = '跨格式导出只保留文字，标题层级与表格结构会丢失';
+  else if (fmt === 'pdf') hint.textContent = '保留标题层级、列表与表格；PDF 源文件原位嵌入保持原排版';
+  else if (fmt === 'md') hint.textContent = '按 Markdown 输出，标题、列表与表格标记保留';
+  else if (fmt === 'html') hint.textContent = '输出带样式的 HTML，结构保留';
+  else if (fmt === 'docx') hint.textContent = '每段一段落，标题层级与表格结构不保留';
+  else hint.textContent = '只保留纯文字';
 }
 
 $('#docExportBtn').addEventListener('click', e => {
@@ -924,7 +1004,7 @@ $('#docExportBtn').addEventListener('click', e => {
   const pop = $('#docExportPop');
   if (!pop) return;
   pop.hidden = !pop.hidden;
-  if (!pop.hidden) docSyncExportHint();
+  if (!pop.hidden) { docSyncExportHint(); docSyncPageNumGroup(); }
 });
 
 // 点面板与按钮以外的地方收起
@@ -941,6 +1021,14 @@ $('#docFmtOpts').addEventListener('click', e => {
   docState.exportFmt = b.dataset.fmt;
   $$('#docFmtOpts .ut-chip').forEach(x => x.classList.toggle('is-active', x === b));
   docSyncExportHint();
+  docSyncPageNumGroup();
+});
+
+$('#docPageNumOpts').addEventListener('click', e => {
+  const b = e.target.closest('.ut-chip');
+  if (!b) return;
+  docState.exportPageNum = b.dataset.pagenum === '1';
+  $$('#docPageNumOpts .ut-chip').forEach(x => x.classList.toggle('is-active', x === b));
 });
 
 $('#docModeOpts').addEventListener('click', e => {
@@ -1001,10 +1089,17 @@ async function docExportRun() {
       setP(outputs.length, outputs.length, '完成');
     } else {
       let i = 0;
+      const renamed = [];
       for (const o of outputs) {
-        await writeDirFile(dirPick.handle, o.name, o.blob);
+        const finalName = await writeDirFile(dirPick.handle, o.name, o.blob);
+        if (finalName !== o.name) renamed.push(o.name + '  →  ' + finalName);
         i++;
         setP(i, outputs.length, '写入');
+      }
+      if (renamed.length) {
+        const list = renamed.slice(0, 8).join('\n');
+        const more = renamed.length > 8 ? '\n…共 ' + renamed.length + ' 个' : '';
+        alert('目标文件夹里已有同名文件，已改名保存，原文件未动：\n\n' + list + more);
       }
     }
   } catch (e) {

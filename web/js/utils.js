@@ -105,12 +105,49 @@ export async function pickDirectory() {
   return { ok: false };
 }
 
-/** 把 blob 写入目录句柄下的指定文件名 */
+/** 目录下该文件名是否已存在（不创建、不覆盖） */
+async function dirFileExists(dirHandle, name) {
+  try {
+    await dirHandle.getFileHandle(name);   // 不带 create：存在则拿到句柄，不存在抛 NotFoundError
+    return true;
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') return false;
+    // 部分实现抛别的异常，退回列举目录判断，宁可多查一次也不能误判成"不存在"
+    try {
+      for await (const entry of dirHandle.values()) {
+        if (entry.name === name && entry.kind === 'file') return true;
+      }
+      return false;
+    } catch (e2) {
+      throw e;
+    }
+  }
+}
+
+/** 在目标目录里挑一个不冲突的文件名：a.txt 已存在就用 a_2.txt、a_3.txt… */
+export async function uniqueDirName(dirHandle, name) {
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  let candidate = name;
+  let k = 2;
+  while (await dirFileExists(dirHandle, candidate)) {
+    candidate = stem + '_' + (k++) + ext;
+  }
+  return candidate;
+}
+
+/**
+ * 把 blob 写入目录句柄下的指定文件名。
+ * 目标目录已有同名文件时自动加序号，不覆盖原文件；返回实际使用的文件名。
+ */
 export async function writeDirFile(dirHandle, name, blob) {
-  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const finalName = await uniqueDirName(dirHandle, name);
+  const fh = await dirHandle.getFileHandle(finalName, { create: true });
   const w = await fh.createWritable();
   await w.write(blob);
   await w.close();
+  return finalName;
 }
 
 /** 把字符串里第 n 次（0 起）出现的 from 替换为 to */

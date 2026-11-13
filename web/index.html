@@ -14,7 +14,7 @@
   <div class="ut-brand">
     <span class="ut-brand__mark">译</span>
     <span class="ut-brand__name">万能翻译站</span>
-    <span class="ut-brand__ver">v1.4.1</span>
+    <span class="ut-brand__ver">v1.4.2</span>
   </div>
   <nav class="ut-nav" id="mainNav">
     <button class="ut-nav__item is-active" data-ws="document" type="button">文档</button>
@@ -106,6 +106,13 @@
               <div class="ut-export-pop__opts" id="docModeOpts">
                 <button class="ut-chip is-active" data-mode="files" type="button">逐个写入文件夹</button>
                 <button class="ut-chip" data-mode="zip" type="button">打包 ZIP</button>
+              </div>
+            </div>
+            <div class="ut-export-pop__group" id="docPageNumGroup" hidden>
+              <span class="ut-export-pop__label">页码</span>
+              <div class="ut-export-pop__opts" id="docPageNumOpts">
+                <button class="ut-chip is-active" data-pagenum="0" type="button">不显示</button>
+                <button class="ut-chip" data-pagenum="1" type="button">页脚页码</button>
               </div>
             </div>
             <p class="ut-export-pop__hint" id="docExportHint"></p>
@@ -431,6 +438,13 @@
           更新日志
         </summary>
         <div class="ut-help__body">
+          <h4>v1.4.2 (2026-11-13)</h4>
+          <ul>
+            <li>导出 PDF 保留文档结构：Markdown 与 Word 源文件导出 PDF 时，标题层级、列表、表格、代码块、引用块都按原结构排，不再退化成一段段纯文字；排版为黑白极简</li>
+            <li>可选页脚页码：导出面板新增页码开关，只在选 PDF 时出现，默认不显示</li>
+            <li>导出去掉多余标题：md / docx / pdf 不再写入「译文文档」字样与版式说明，正文直接从第一行开始</li>
+            <li>修复导出静默覆盖同名文件：写入文件夹时若已存在同名文件，自动改为 xxx_2、xxx_3 保存，原文件不动，结束后提示改名清单</li>
+          </ul>
           <h4>v1.4.1 (2026-11-02)</h4>
           <ul>
             <li>修复 Markdown / 文本文档提取不全：目标是中文时提取器按汉字数量把整行判为中文就跳过，240 行的笔记只提出 2 条；现在提取全部内容，是否跳过交给翻译阶段判断</li>
@@ -493,6 +507,7 @@
 </aside>
 
 <script src="vendor/jszip.min.js"></script>
+<script src="vendor/marked.min.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

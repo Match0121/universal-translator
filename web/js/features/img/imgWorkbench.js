@@ -741,6 +741,7 @@ async function exportFiles() {
   imgProgressShow('正在合成覆盖图…');
   try {
     const used = new Set();
+    const renamed = [];
     let done = 0;
     let skipped = 0;
     for (const img of targets) {
@@ -757,7 +758,8 @@ async function exportFiles() {
         let k = 2;
         while (used.has(fname)) fname = `${base}_${k++}_译文.png`;
         used.add(fname);
-        await writeDirFile(dirPick.handle, fname, blob);
+        const finalName = await writeDirFile(dirPick.handle, fname, blob);
+        if (finalName !== fname) renamed.push(fname + '  →  ' + finalName);
       } else {
         skipped++;
       }
@@ -765,8 +767,14 @@ async function exportFiles() {
       imgProgressSet(done, targets.length, img.name);
     }
     if (withText) {
-      await writeDirFile(dirPick.handle, '文本对照.md',
+      const n = await writeDirFile(dirPick.handle, '文本对照.md',
         new Blob([buildMarkdown()], { type: 'text/markdown;charset=utf-8' }));
+      if (n !== '文本对照.md') renamed.push('文本对照.md  →  ' + n);
+    }
+    if (renamed.length) {
+      const list = renamed.slice(0, 8).join('\n');
+      const more = renamed.length > 8 ? '\n…共 ' + renamed.length + ' 个' : '';
+      alert('目标文件夹里已有同名文件，已改名保存，原文件未动：\n\n' + list + more);
     }
     if (skipped) alert(`有 ${skipped} 张图片合成失败，已跳过`);
   } catch (e) {
