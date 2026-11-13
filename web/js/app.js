@@ -822,10 +822,13 @@ function pickView(u, view) {
   return u.original + ' / ' + (u.translated || '');
 }
 
-/** HTML 导出外壳：与 PDF 同一套黑白排版，只是换成系统字体 */
-function htmlShell(body) {
+/** HTML 导出外壳：与 PDF 同一套黑白排版，只是换成系统字体。
+ *  title 用源文件名（不带扩展名），浏览器标签页显示的就是用户自己的文档名，
+ *  不再写死「译文」这种字样。 */
+function htmlShell(body, sourceName) {
+  const title = String(sourceName || '').replace(/\.[^.]+$/, '') || '文档';
   return '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
-    + '<title>译文</title>\n<style>\n'
+    + '<title>' + escapeHtml(title) + '</title>\n<style>\n'
     + 'body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;font-size:15px;'
     + 'line-height:1.75;color:#000;max-width:820px;margin:48px auto;padding:0 24px}\n'
     + 'h1{font-size:26px;line-height:1.35;margin:0 0 18px}\n'
@@ -887,7 +890,7 @@ async function docConvert(f, us, fmt) {
   }
 
   if (fmt === 'html') {
-    return new Blob([htmlShell(await docToHtml(f, sorted))], { type: 'text/html;charset=utf-8' });
+    return new Blob([htmlShell(await docToHtml(f, sorted), f.name)], { type: 'text/html;charset=utf-8' });
   }
 
   if (fmt === 'pdf' && type !== 'pdf') {
@@ -1049,7 +1052,7 @@ async function docExportRun() {
   const mode = docState.exportMode;
   const btn = $('#docExportBtn');
   const wrap = $('#docProgressWrap');
-  const zipName = '译文文档.zip';
+  const zipName = '译文.zip';
 
   // 先弹保存位置：必须在用户激活窗口内调用，否则会被拒
   let pick = null;

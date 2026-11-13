@@ -378,7 +378,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json({'ok': False, 'error': str(e)}, 502)
 
     def _handle_pdf_export(self):
-        # 接收 {tempId, translated, fmt} → 读回 PDF+段落 → 生成译文文档返回
+        # 接收 {tempId, translated, fmt} → 读回 PDF+段落 → 生成目标格式文件返回
         try:
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length).decode('utf-8'))

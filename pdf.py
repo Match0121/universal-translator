@@ -690,7 +690,7 @@ def _unify_docx_style(wd):
             _lock_rfonts(rpr)
 
 def export_translated(original_paras, translated_paras, fmt, src_bytes=None):
-    """按 fmt 生成译文文档，返回 (bytes, filename, mime)
+    """按 fmt 生成目标格式文件，返回 (bytes, filename, mime)
     original_paras: [{seq|idx, original}]；translated_paras: [{idx, translated}]
     fmt: 'docx' | 'md' | 'txt' | 'pdf'
     """
